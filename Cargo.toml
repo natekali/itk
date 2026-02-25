@@ -1,0 +1,30 @@
+[package]
+name = "itk"
+version = "0.1.0"
+edition = "2021"
+description = "Input Token Killer — compress content before pasting into LLMs"
+license = "MIT"
+repository = "https://github.com/itk-ai/itk"
+keywords = ["llm", "tokens", "clipboard", "productivity", "ai"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "itk"
+path = "src/main.rs"
+
+[dependencies]
+clap               = { version = "4.5",  features = ["derive"] }
+arboard            = { version = "=3.2.1", default-features = false }
+strip-ansi-escapes = "0.2"
+rusqlite           = { version = "0.31", features = ["bundled"] }
+regex              = "1.11"
+serde              = { version = "1.0",  features = ["derive"] }
+serde_json         = "1.0"
+chrono             = { version = "0.4",  features = ["serde"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
