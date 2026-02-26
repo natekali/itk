@@ -4,6 +4,7 @@ mod db;
 mod detect;
 mod gain;
 mod prompt;
+mod update;
 
 use clap::{Parser, Subcommand};
 use std::io::{self, IsTerminal, Read, Write};
@@ -56,18 +57,27 @@ enum Commands {
         #[arg(long = "history")]
         history: bool,
     },
+    /// Update itk to the latest release
+    Update,
 }
 
 fn main() {
     let cli = Cli::parse();
 
     // ── Handle subcommands ────────────────────────────────────────────────────
-    if let Some(Commands::Gain { history }) = cli.command {
-        match db::open() {
-            Ok(conn) => gain::display(&conn, history),
-            Err(e) => eprintln!("itk: could not open history database: {e}"),
+    match cli.command {
+        Some(Commands::Gain { history }) => {
+            match db::open() {
+                Ok(conn) => gain::display(&conn, history),
+                Err(e) => eprintln!("itk: could not open history database: {e}"),
+            }
+            return;
         }
-        return;
+        Some(Commands::Update) => {
+            update::run(false);
+            return;
+        }
+        None => {}
     }
 
     // ── Determine input/output mode ───────────────────────────────────────────
@@ -99,11 +109,7 @@ fn main() {
     }
 
     // ── Detect → Clean ────────────────────────────────────────────────────────
-    let content_type = detect::detect(
-        &input,
-        cli.diff,
-        cli.force_type.as_deref(),
-    );
+    let content_type = detect::detect(&input, cli.diff, cli.force_type.as_deref());
 
     let opts = clean::CleanOptions {
         aggressive: cli.aggressive,
@@ -118,8 +124,7 @@ fn main() {
     // ── Token accounting ──────────────────────────────────────────────────────
     let original_tokens = estimate_tokens(&input);
     let cleaned_tokens = estimate_tokens(&cleaned);
-    let savings_pct = if original_tokens > 0 {
-        // Allow negative savings (content grew) — shown as signed %
+    let savings_pct: i64 = if original_tokens > 0 {
         let saved = original_tokens as i64 - cleaned_tokens as i64;
         saved * 100 / original_tokens as i64
     } else {
@@ -132,12 +137,13 @@ fn main() {
         let _ = db::record_run(&mut conn, &type_label, original_tokens, cleaned_tokens);
     }
 
+    // ── Format savings — never show "-0%" or "+0%" ────────────────────────────
+    let savings_str = format_savings(original_tokens, cleaned_tokens, savings_pct);
+
     // ── Build final output ────────────────────────────────────────────────────
     let output = if cli.stats {
-        let sign = if savings_pct >= 0 { "-" } else { "+" };
-        let abs_pct = savings_pct.unsigned_abs();
         format!(
-            "# ITK [{type_label}]: {original_tokens} → {cleaned_tokens} tokens ({sign}{abs_pct}%)\n{cleaned}"
+            "# ITK [{type_label}]: {original_tokens} -> {cleaned_tokens} tokens ({savings_str})\n{cleaned}"
         )
     } else {
         cleaned
@@ -156,18 +162,34 @@ fn main() {
     } else {
         match clipboard::write(&output) {
             Ok(()) => {
-                let sign = if savings_pct >= 0 { "-" } else { "+" };
-                let abs_pct = savings_pct.unsigned_abs();
-                eprintln!(
-                    "itk: [{type_label}] {original_tokens} → {cleaned_tokens} tokens ({sign}{abs_pct}%)"
-                );
+                eprintln!("itk: [{type_label}] {original_tokens} -> {cleaned_tokens} tokens ({savings_str})");
             }
             Err(e) => eprintln!("itk: {e}"),
         }
     }
 }
 
-/// Estimate token count: word_count × 1.3, rounded to nearest integer.
+/// Format savings percentage cleanly.
+///   saved > 0  =>  "-42%"
+///   saved < 0  =>  "+7%"   (content grew, e.g. code wrapped in fences)
+///   no change  =>  "no change"
+///   tiny diff  =>  "-<1%" / "+<1%"
+fn format_savings(original: u64, cleaned: u64, pct: i64) -> String {
+    if original == cleaned {
+        return "no change".to_string();
+    }
+    if pct > 0 {
+        format!("-{pct}%")
+    } else if pct < 0 {
+        format!("+{}%", pct.unsigned_abs())
+    } else if cleaned < original {
+        "-<1%".to_string()
+    } else {
+        "+<1%".to_string()
+    }
+}
+
+/// Estimate token count: word_count x 1.3, rounded to nearest integer.
 fn estimate_tokens(text: &str) -> u64 {
     let words = text.split_whitespace().count() as f64;
     (words * 1.3).round() as u64
