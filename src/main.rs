@@ -14,7 +14,8 @@ use std::io::{self, IsTerminal, Read, Write};
     about = "Input Token Killer — compress content before pasting into LLMs",
     long_about = "ITK reads from clipboard (or stdin), cleans and compresses the content,\n\
                   then writes it back to clipboard (or stdout).\n\n\
-                  Auto-detects: stack traces, git diffs, logs, JSON, YAML, code.",
+                  Auto-detects: stack traces (JS/TS/Python/Rust/Go/Java), git diffs,\n\
+                  logs, JSON, YAML, and code blocks.",
     version
 )]
 struct Cli {
@@ -30,11 +31,16 @@ struct Cli {
     #[arg(long = "diff")]
     diff: bool,
 
+    /// Force content type instead of auto-detecting.
+    /// Values: diff, log, json, yaml, trace, rust, python, js, ts, go, java
+    #[arg(long = "type", value_name = "TYPE")]
+    force_type: Option<String>,
+
     /// Wrap output in a prompt template: fix | explain | refactor | review | debug
-    #[arg(long = "prompt", value_name = "TYPE")]
+    #[arg(long = "prompt", value_name = "TEMPLATE")]
     prompt_type: Option<String>,
 
-    /// Print token savings inline as a header comment
+    /// Print token savings and detected type as a header comment
     #[arg(long = "stats")]
     stats: bool,
 
@@ -93,7 +99,11 @@ fn main() {
     }
 
     // ── Detect → Clean ────────────────────────────────────────────────────────
-    let content_type = detect::detect(&input, cli.diff);
+    let content_type = detect::detect(
+        &input,
+        cli.diff,
+        cli.force_type.as_deref(),
+    );
 
     let opts = clean::CleanOptions {
         aggressive: cli.aggressive,
@@ -109,25 +119,25 @@ fn main() {
     let original_tokens = estimate_tokens(&input);
     let cleaned_tokens = estimate_tokens(&cleaned);
     let savings_pct = if original_tokens > 0 {
-        100u64.saturating_sub(cleaned_tokens * 100 / original_tokens)
+        // Allow negative savings (content grew) — shown as signed %
+        let saved = original_tokens as i64 - cleaned_tokens as i64;
+        saved * 100 / original_tokens as i64
     } else {
         0
     };
 
     // Persist stats (best-effort — never blocks or fails the main path)
+    let type_label = content_type.label();
     if let Ok(mut conn) = db::open() {
-        let _ = db::record_run(
-            &mut conn,
-            &format!("{content_type:?}"),
-            original_tokens,
-            cleaned_tokens,
-        );
+        let _ = db::record_run(&mut conn, &type_label, original_tokens, cleaned_tokens);
     }
 
     // ── Build final output ────────────────────────────────────────────────────
     let output = if cli.stats {
+        let sign = if savings_pct >= 0 { "-" } else { "+" };
+        let abs_pct = savings_pct.unsigned_abs();
         format!(
-            "# ITK: {original_tokens} → {cleaned_tokens} tokens (-{savings_pct}%)\n{cleaned}"
+            "# ITK [{type_label}]: {original_tokens} → {cleaned_tokens} tokens ({sign}{abs_pct}%)\n{cleaned}"
         )
     } else {
         cleaned
@@ -140,16 +150,16 @@ fn main() {
         if let Err(e) = handle.write_all(output.as_bytes()) {
             eprintln!("itk: stdout write failed: {e}");
         }
-        // Ensure output ends with newline for shell friendliness
         if !output.ends_with('\n') {
             let _ = handle.write_all(b"\n");
         }
     } else {
         match clipboard::write(&output) {
             Ok(()) => {
+                let sign = if savings_pct >= 0 { "-" } else { "+" };
+                let abs_pct = savings_pct.unsigned_abs();
                 eprintln!(
-                    "itk: clipboard updated  {original_tokens} → {cleaned_tokens} tokens  \
-                     (-{savings_pct}%)"
+                    "itk: [{type_label}] {original_tokens} → {cleaned_tokens} tokens ({sign}{abs_pct}%)"
                 );
             }
             Err(e) => eprintln!("itk: {e}"),
@@ -158,7 +168,6 @@ fn main() {
 }
 
 /// Estimate token count: word_count × 1.3, rounded to nearest integer.
-/// No LLM or tiktoken needed — accurate enough for savings tracking.
 fn estimate_tokens(text: &str) -> u64 {
     let words = text.split_whitespace().count() as f64;
     (words * 1.3).round() as u64

@@ -127,7 +127,16 @@ fn fmt_num(n: u64) -> String {
 }
 
 fn friendly_type_name(ct: &str) -> String {
+    // Handle both old Debug format ("StackTrace(JavaScript)") and new label format ("trace/javascript")
     ct.replace("StackTrace(", "trace/")
+        .replace("Code(\"", "code/")
+        .replace("LogFile", "log")
+        .replace("GitDiff", "git-diff")
+        .replace("PlainText", "text")
+        .replace("Json", "json")
+        .replace("Yaml", "yaml")
+        .replace("Unknown", "unknown")
+        .replace("\")", "")
         .replace(')', "")
-        .replace("Unknown", "trace/unknown")
+        .to_lowercase()
 }
