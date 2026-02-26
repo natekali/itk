@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$Repo        = "itk-ai/itk"
+$Repo        = "natekali/itk"
 $AssetName   = "itk-windows-x86_64.exe"
 $InstallDir  = "$env:ProgramFiles\itk"
 $BinPath     = "$InstallDir\itk.exe"

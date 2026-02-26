@@ -9,12 +9,12 @@
 
 **Linux / macOS:**
 ```bash
-curl -fsSL https://itk-ai.app/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/natekali/itk/main/install.sh | sh
 ```
 
 **Windows (PowerShell):**
 ```powershell
-irm https://itk-ai.app/install.ps1 | iex
+irm https://raw.githubusercontent.com/natekali/itk/main/install.ps1 | iex
 ```
 
 **From source:**

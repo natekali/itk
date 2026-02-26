@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Input Token Killer — compress content before pasting into LLMs"
 license = "MIT"
-repository = "https://github.com/itk-ai/itk"
+repository = "https://github.com/natekali/itk"
 keywords = ["llm", "tokens", "clipboard", "productivity", "ai"]
 categories = ["command-line-utilities"]
 

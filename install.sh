@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -e
 
-REPO="itk-ai/itk"
+REPO="natekali/itk"
 BIN_NAME="itk"
 INSTALL_DIR="/usr/local/bin"
 BASE_URL="https://github.com/${REPO}/releases/latest/download"
@@ -26,7 +26,7 @@ case "${OS}" in
     ;;
   *)
     echo "itk: unsupported OS: ${OS}" >&2
-    echo "For Windows, run in PowerShell: irm https://itk-ai.app/install.ps1 | iex" >&2
+    echo "For Windows, run in PowerShell: irm https://raw.githubusercontent.com/natekali/itk/main/install.ps1 | iex" >&2
     exit 1
     ;;
 esac
