@@ -45,6 +45,8 @@ fn context_hint(ct: &ContentType) -> &'static str {
         ContentType::Json => "JSON data",
         ContentType::Yaml => "YAML configuration",
         ContentType::Code(_) => "code",
+        ContentType::BuildOutput(_) => "build output",
+        ContentType::Markdown => "documentation",
         ContentType::PlainText => "text",
     }
 }

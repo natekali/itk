@@ -122,8 +122,8 @@ fn main() {
     let cleaned = clean::clean(&input, &opts);
 
     // ── Token accounting ──────────────────────────────────────────────────────
-    let original_tokens = estimate_tokens(&input);
-    let cleaned_tokens = estimate_tokens(&cleaned);
+    let original_tokens = estimate_tokens(&input, &content_type);
+    let cleaned_tokens = estimate_tokens(&cleaned, &content_type);
     let savings_pct: i64 = if original_tokens > 0 {
         let saved = original_tokens as i64 - cleaned_tokens as i64;
         saved * 100 / original_tokens as i64
@@ -189,8 +189,26 @@ fn format_savings(original: u64, cleaned: u64, pct: i64) -> String {
     }
 }
 
-/// Estimate token count: word_count x 1.3, rounded to nearest integer.
-fn estimate_tokens(text: &str) -> u64 {
+/// Estimate token count with content-type awareness.
+/// Approximates real tokenizer behaviour without external crates:
+///   - prose ≈ 1 word per token
+///   - code / JSON: punctuation characters ({}[]():,;) are often individual tokens
+///   - per-type multipliers calibrated against typical tiktoken counts
+fn estimate_tokens(text: &str, ct: &detect::ContentType) -> u64 {
+    use detect::ContentType;
     let words = text.split_whitespace().count() as f64;
-    (words * 1.3).round() as u64
+    // Punctuation that tokenisers usually split into separate tokens
+    let punct = text.chars().filter(|c| "{}[]():,;".contains(*c)).count() as f64;
+    let multiplier: f64 = match ct {
+        ContentType::Json => 1.1,           // punct counted separately below
+        ContentType::Yaml => 1.15,
+        ContentType::Code(_) => 1.5,        // identifiers + operators
+        ContentType::StackTrace(_) => 1.4,  // paths, colons, parens
+        ContentType::LogFile => 1.3,
+        ContentType::GitDiff => 1.35,
+        ContentType::BuildOutput(_) => 1.3,
+        ContentType::Markdown => 1.2,
+        ContentType::PlainText => 1.2,
+    };
+    ((words * multiplier) + punct * 0.5).round() as u64
 }

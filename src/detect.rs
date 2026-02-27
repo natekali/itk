@@ -9,6 +9,8 @@ pub enum ContentType {
     Json,
     Yaml,
     Code(String),
+    BuildOutput(BuildTool),
+    Markdown,
     PlainText,
 }
 
@@ -22,6 +24,8 @@ impl ContentType {
             ContentType::Json => "json".to_string(),
             ContentType::Yaml => "yaml".to_string(),
             ContentType::Code(l) => format!("code/{l}"),
+            ContentType::BuildOutput(t) => format!("build/{t:?}").to_lowercase(),
+            ContentType::Markdown => "markdown".to_string(),
             ContentType::PlainText => "text".to_string(),
         }
     }
@@ -36,6 +40,15 @@ pub enum StackTraceLang {
     Go,
     Java,
     Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum BuildTool {
+    Cargo,
+    TypeScript,
+    Eslint,
+    Generic,
 }
 
 // ── Git diff ─────────────────────────────────────────────────────────────────
@@ -65,22 +78,16 @@ fn re_java_trace() -> &'static Regex {
 }
 
 /// JS/TS: matches "at X (..." OR "at async X (..." OR "at async X.Y (..."
-/// Bug fix: old regex was `\S+\s+\(` which matched only ONE word before `(`.
-/// "at async handleRequest (" has TWO words (async + handleRequest) before `(`.
 fn re_js_trace() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
-        // Match: optional whitespace + "at" + one or more words/dots + "("
-        // Covers: "at foo (", "at async foo (", "at Foo.bar (", "at Object.<anonymous> ("
         Regex::new(r"(?m)^\s+at\s+(?:async\s+)?[\w.<>\[\]$]+(?:\.[\w<>\[\]$]+)*\s+\(").unwrap()
     })
 }
 
 /// Rust: "   N: path::to::function" — numbered backtrace frames
-/// Also catches "thread 'X' panicked" as strong Rust signal
 fn re_rust_trace() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    // Match numbered frames: "   3: some::path" (space, digits, colon, space, non-space)
     R.get_or_init(|| Regex::new(r"(?m)^\s{1,6}\d+:\s+\S").unwrap())
 }
 
@@ -89,9 +96,47 @@ fn re_rust_panic() -> &'static Regex {
     R.get_or_init(|| Regex::new(r"(?m)^thread '.+' panicked at").unwrap())
 }
 
+// ── Build output ──────────────────────────────────────────────────────────────
+
+fn re_cargo_build() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(
+            r"(?xm)
+            # Cargo build lines (leading spaces are part of cargo's format)
+            ^\ {0,3}(?:Compiling|Checking|Downloading|Downloaded|Fresh|Updating|Locking)\s
+            |
+            # Cargo error/warning markers
+            ^error\[E\d+\]
+            |
+            ^warning:\
+            |
+            # Cargo finish / could not compile
+            ^(?:Finished\ (?:dev|release|test)|error:\ could\ not\ compile)
+        "
+        ).unwrap()
+    })
+}
+
+fn re_tsc_error() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"(?m)\w+\.tsx?\(\d+,\d+\): (?:error|warning) TS\d+:").unwrap()
+    })
+}
+
+fn re_eslint_error() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        // ESLint: "  12:5  error  message  rule/name" lines after a file path
+        Regex::new(r"(?m)^\s+\d+:\d+\s+(?:error|warning)\s+\S").unwrap()
+    })
+}
+
 // ── Log files ─────────────────────────────────────────────────────────────────
 
-/// Broad log detection: ISO timestamps, bracketed levels, key=value levels, cargo/npm output
+/// Broad log detection: ISO timestamps, bracketed levels, key=value levels.
+/// NOTE: Cargo build patterns removed — those are now BuildOutput.
 fn re_log_line() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
@@ -108,9 +153,6 @@ fn re_log_line() -> &'static Regex {
             |
             # Prefix log levels (systemd, docker): INFO:, ERROR:
             ^(?:INFO|WARN|ERROR|DEBUG|TRACE|FATAL)[\s:]
-            |
-            # Cargo/npm build output lines
-            ^(?:Compiling|Downloading|Downloaded|Checking|Finished|error\[E\d+\]|warning:)
         "
         ).unwrap()
     })
@@ -135,7 +177,7 @@ pub fn detect(text: &str, force_diff: bool, force_type: Option<&str>) -> Content
         return parse_forced_type(t);
     }
 
-    // Scan first 8 KB (increased from 4 KB for better log detection on pasted output)
+    // Scan first 8 KB for performance on large inputs
     let sample = if text.len() > 8192 { &text[..8192] } else { text };
 
     // ── 1. Git diff — very distinctive markers ────────────────────────────────
@@ -165,7 +207,7 @@ pub fn detect(text: &str, force_diff: bool, force_type: Option<&str>) -> Content
         return ContentType::StackTrace(StackTraceLang::Rust);
     }
 
-    // JS/TS: needs >= 2 "at" frames (lowered from 3 — real traces often have 3-5 frames)
+    // JS/TS: needs >= 2 "at" frames
     let js_matches = re_js_trace().find_iter(sample).count();
     if js_matches >= 2 {
         return ContentType::StackTrace(StackTraceLang::JavaScript);
@@ -177,29 +219,48 @@ pub fn detect(text: &str, force_diff: bool, force_type: Option<&str>) -> Content
         return ContentType::StackTrace(StackTraceLang::Rust);
     }
 
-    // ── 3. Log file — lowered threshold to 3 (from 5) ────────────────────────
+    // ── 3. Build output (BEFORE log — cargo patterns were previously misdetected) ─
+    let cargo_matches = re_cargo_build().find_iter(sample).count();
+    if cargo_matches >= 2 {
+        return ContentType::BuildOutput(BuildTool::Cargo);
+    }
+    let tsc_matches = re_tsc_error().find_iter(sample).count();
+    if tsc_matches >= 1 {
+        return ContentType::BuildOutput(BuildTool::TypeScript);
+    }
+    let eslint_matches = re_eslint_error().find_iter(sample).count();
+    if eslint_matches >= 3 {
+        return ContentType::BuildOutput(BuildTool::Eslint);
+    }
+
+    // ── 4. Log file ───────────────────────────────────────────────────────────
     let log_matches = re_log_line().find_iter(sample).count();
     if log_matches >= 3 {
         return ContentType::LogFile;
     }
 
-    // ── 4. JSON ───────────────────────────────────────────────────────────────
+    // ── 5. JSON ───────────────────────────────────────────────────────────────
     let trimmed = sample.trim_start();
     if (trimmed.starts_with('{') || trimmed.starts_with('[')) && lookslike_json(trimmed) {
         return ContentType::Json;
     }
 
-    // ── 5. YAML ───────────────────────────────────────────────────────────────
+    // ── 6. YAML ───────────────────────────────────────────────────────────────
     if lookslike_yaml(sample) {
         return ContentType::Yaml;
     }
 
-    // ── 6. Code blocks ────────────────────────────────────────────────────────
+    // ── 7. Markdown ───────────────────────────────────────────────────────────
+    if lookslike_markdown(sample) {
+        return ContentType::Markdown;
+    }
+
+    // ── 8. Code blocks ────────────────────────────────────────────────────────
     if let Some(lang) = detect_code_language(sample) {
         return ContentType::Code(lang);
     }
 
-    // ── 7. ANSI escape codes → treat as log output ───────────────────────────
+    // ── 9. ANSI escape codes → treat as log output ───────────────────────────
     if re_ansi().is_match(sample) {
         return ContentType::LogFile;
     }
@@ -218,6 +279,10 @@ fn parse_forced_type(t: &str) -> ContentType {
         "js" | "javascript" => ContentType::Code("javascript".to_string()),
         "ts" | "typescript" => ContentType::Code("typescript".to_string()),
         "trace" | "stack" => ContentType::StackTrace(StackTraceLang::Unknown),
+        "build" | "cargo" => ContentType::BuildOutput(BuildTool::Cargo),
+        "tsc" => ContentType::BuildOutput(BuildTool::TypeScript),
+        "eslint" | "lint" => ContentType::BuildOutput(BuildTool::Eslint),
+        "md" | "markdown" => ContentType::Markdown,
         _ => ContentType::PlainText,
     }
 }
@@ -244,6 +309,23 @@ fn lookslike_yaml(s: &str) -> bool {
         })
         .count();
     kv_count >= 4
+}
+
+fn lookslike_markdown(s: &str) -> bool {
+    let lines: Vec<&str> = s.lines().take(40).collect();
+    let h_count = lines.iter().filter(|l| l.starts_with('#')).count();
+    let badge_count = lines
+        .iter()
+        .filter(|l| l.contains("![") && l.contains("]("))
+        .count();
+    let fence_count = lines.iter().filter(|l| l.starts_with("```")).count();
+    let link_count = lines.iter().filter(|l| l.contains("](http")).count();
+    // Require at least 2 structural markdown signals
+    let score = (h_count >= 2) as u8
+        + (badge_count >= 1) as u8
+        + (fence_count >= 1) as u8
+        + (link_count >= 2) as u8;
+    score >= 2
 }
 
 fn detect_code_language(s: &str) -> Option<String> {

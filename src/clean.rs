@@ -1,6 +1,7 @@
-use crate::detect::{ContentType, StackTraceLang};
+use crate::detect::{BuildTool, ContentType, StackTraceLang};
 use crate::prompt;
 use regex::Regex;
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 pub struct CleanOptions<'a> {
@@ -30,9 +31,11 @@ fn clean_inner(input: &str, opts: &CleanOptions) -> String {
         ContentType::StackTrace(lang) => clean_stack_trace(&stripped, lang, opts.aggressive),
         ContentType::GitDiff => clean_git_diff(&stripped, opts.aggressive),
         ContentType::LogFile => clean_log(&stripped, opts.aggressive),
-        ContentType::Json => clean_json(&stripped),
-        ContentType::Yaml => clean_yaml(&stripped),
-        ContentType::Code(lang) => clean_code(&stripped, lang),
+        ContentType::Json => clean_json(&stripped, opts.aggressive),
+        ContentType::Yaml => clean_yaml(&stripped, opts.aggressive),
+        ContentType::Code(lang) => clean_code(&stripped, lang, opts.aggressive),
+        ContentType::BuildOutput(tool) => clean_build_output(&stripped, tool, opts.aggressive),
+        ContentType::Markdown => clean_markdown(&stripped, opts.aggressive),
         ContentType::PlainText => clean_plain(&stripped),
     };
 
@@ -132,7 +135,6 @@ fn clean_python_trace(s: &str, aggressive: bool) -> String {
                 continue;
             }
 
-            // The code line that follows a File/line header
             if last_was_frame_header {
                 if frame_count <= frame_limit {
                     out.push(line.to_string());
@@ -141,7 +143,6 @@ fn clean_python_trace(s: &str, aggressive: bool) -> String {
                 continue;
             }
 
-            // Error message / end of traceback block
             if !trimmed.is_empty() {
                 in_traceback = false;
                 out.push(line.to_string());
@@ -256,7 +257,6 @@ fn clean_go_trace(s: &str, aggressive: bool) -> String {
         }
 
         if in_goroutine {
-            // Go frames: function call line + file:line pair
             if !trimmed.is_empty() && (trimmed.ends_with(')') || trimmed.contains(".go:")) {
                 frame_count += 1;
                 if frame_count <= frame_limit {
@@ -285,7 +285,6 @@ fn clean_java_trace(s: &str, aggressive: bool) -> String {
         let trimmed = line.trim();
 
         if re_java_caused_by().is_match(trimmed) {
-            // New exception block — reset counters
             out.push(line.to_string());
             frame_count = 0;
             truncated = false;
@@ -335,14 +334,10 @@ fn clean_git_diff(s: &str, aggressive: bool) -> String {
     let keep: usize = if aggressive { 1 } else { 2 };
     let mut out: Vec<String> = Vec::new();
     let mut in_hunk = false;
-    // Sliding window of context lines seen since the last +/- line.
-    // When a new +/- line arrives: keep only the last `keep` lines as pre-context.
-    // When the hunk ends: keep only the first `keep` lines as post-context.
     let mut ctx_window: Vec<String> = Vec::new();
     let mut last_was_change = false;
 
     let flush_pre_context = |out: &mut Vec<String>, ctx: &mut Vec<String>, keep: usize| {
-        // Emit up to `keep` trailing lines from ctx as pre-change context
         if ctx.len() > keep {
             out.push(format!(" ... [{} context lines omitted]", ctx.len() - keep));
             let start = ctx.len() - keep;
@@ -356,7 +351,6 @@ fn clean_git_diff(s: &str, aggressive: bool) -> String {
     };
 
     let flush_post_context = |out: &mut Vec<String>, ctx: &mut Vec<String>, keep: usize| {
-        // Emit up to `keep` leading lines from ctx as post-change context
         if ctx.len() > keep {
             for l in ctx.drain(..keep) {
                 out.push(l);
@@ -400,27 +394,14 @@ fn clean_git_diff(s: &str, aggressive: bool) -> String {
 
         match line.chars().next() {
             Some('+') | Some('-') => {
-                if last_was_change {
-                    // Context lines between two change lines — emit as pre-context
-                    flush_pre_context(&mut out, &mut ctx_window, keep);
-                } else {
-                    // First change after context — emit trailing context_window as pre-context
-                    flush_pre_context(&mut out, &mut ctx_window, keep);
-                }
+                flush_pre_context(&mut out, &mut ctx_window, keep);
                 out.push(line.to_string());
                 last_was_change = true;
             }
             Some(' ') => {
-                if last_was_change {
-                    // Post-change context — accumulate
-                    ctx_window.push(line.to_string());
-                } else {
-                    // Pre-change context — accumulate (will be trimmed when change arrives)
-                    ctx_window.push(line.to_string());
-                }
+                ctx_window.push(line.to_string());
             }
             _ => {
-                // e.g. "\ No newline at end of file"
                 if last_was_change {
                     flush_post_context(&mut out, &mut ctx_window, keep);
                 } else {
@@ -477,11 +458,9 @@ fn clean_log(s: &str, aggressive: bool) -> String {
     let mut suppressed = 0usize;
 
     for line in s.lines() {
-        // Skip progress-bar lines
         if re_progress_bar().is_match(line) {
             continue;
         }
-        // Skip carriage-return-overwrite lines (terminal progress)
         if line.starts_with('\r') {
             continue;
         }
@@ -518,35 +497,485 @@ fn normalize_log_line(line: &str) -> String {
     s
 }
 
+// ── BUILD OUTPUT ──────────────────────────────────────────────────────────────
+
+fn re_cargo_noise() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    // Lines that carry zero signal — drop entirely
+    R.get_or_init(|| {
+        Regex::new(
+            r"(?x)^\ {0,3}(?:Compiling|Checking|Downloading|Downloaded|Fresh|Updating|Locking|Blocking|Fetching)\s"
+        ).unwrap()
+    })
+}
+
+fn re_cargo_error_loc() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    // "  --> src/main.rs:42:5" location lines
+    R.get_or_init(|| Regex::new(r"^\s+-->\s+").unwrap())
+}
+
+fn re_cargo_pipe() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    // "   |" gutter lines used for code context in error messages
+    R.get_or_init(|| Regex::new(r"^\s+\|\s*").unwrap())
+}
+
+fn re_tsc_error_line() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"^(.+\.tsx?)\((\d+),(\d+)\): (error|warning) (TS\d+): (.+)$").unwrap()
+    })
+}
+
+fn clean_build_output(s: &str, tool: &BuildTool, aggressive: bool) -> String {
+    match tool {
+        BuildTool::Cargo => clean_cargo_output(s, aggressive),
+        BuildTool::TypeScript => clean_tsc_output(s, aggressive),
+        BuildTool::Eslint => clean_eslint_output(s, aggressive),
+        BuildTool::Generic => clean_log(s, aggressive),
+    }
+}
+
+fn clean_cargo_output(s: &str, _aggressive: bool) -> String {
+    // Pass 1: collect errors/warnings, drop noise
+    // Group by file: BTreeMap<file_path, Vec<message>>
+    let mut errors_by_file: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut warnings_by_file: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut finish_line: Option<String> = None;
+    let mut error_summary: Option<String> = None;
+
+    // State for grouping: current error/warning being accumulated
+    let mut current_file = String::new();
+    let mut current_msg: Vec<String> = Vec::new();
+    let mut current_is_error = false;
+    let mut in_diagnostic = false;
+
+    let flush = |file: &str, msg: &[String], is_error: bool,
+                  errors: &mut BTreeMap<String, Vec<String>>,
+                  warnings: &mut BTreeMap<String, Vec<String>>| {
+        if msg.is_empty() || file.is_empty() {
+            return;
+        }
+        let joined = msg.join(" ").trim().to_string();
+        if is_error {
+            errors.entry(file.to_string()).or_default().push(joined);
+        } else {
+            warnings.entry(file.to_string()).or_default().push(joined);
+        }
+    };
+
+    for line in s.lines() {
+        let trimmed = line.trim();
+
+        // Drop pure noise lines
+        if re_cargo_noise().is_match(line) {
+            continue;
+        }
+
+        // Finish / could not compile
+        if trimmed.starts_with("Finished ") || trimmed.starts_with("error: could not compile") {
+            flush(&current_file, &current_msg, current_is_error,
+                  &mut errors_by_file, &mut warnings_by_file);
+            current_msg.clear();
+            in_diagnostic = false;
+            if trimmed.starts_with("Finished ") {
+                finish_line = Some(line.trim().to_string());
+            } else {
+                error_summary = Some(line.trim().to_string());
+            }
+            continue;
+        }
+
+        // New error[Exxxx] line
+        if trimmed.starts_with("error[") || trimmed.starts_with("error: ") {
+            flush(&current_file, &current_msg, current_is_error,
+                  &mut errors_by_file, &mut warnings_by_file);
+            current_msg.clear();
+            current_is_error = true;
+            in_diagnostic = true;
+            current_file = String::new();
+            current_msg.push(trimmed.to_string());
+            continue;
+        }
+
+        // New warning line
+        if trimmed.starts_with("warning:") && in_diagnostic {
+            flush(&current_file, &current_msg, current_is_error,
+                  &mut errors_by_file, &mut warnings_by_file);
+            current_msg.clear();
+            current_is_error = false;
+            current_file = String::new();
+            current_msg.push(trimmed.to_string());
+            continue;
+        }
+
+        if in_diagnostic {
+            // Location line: "  --> src/main.rs:42:5"
+            if re_cargo_error_loc().is_match(line) {
+                // Extract file path from "--> path:line:col"
+                if let Some(path_part) = trimmed.strip_prefix("-->").map(|s| s.trim()) {
+                    // Take just the file (before the first colon after the path)
+                    let file_path = path_part
+                        .split(':')
+                        .next()
+                        .unwrap_or(path_part)
+                        .trim()
+                        .to_string();
+                    current_file = file_path;
+                }
+                continue;
+            }
+            // Pipe/gutter lines for code context — skip for brevity
+            if re_cargo_pipe().is_match(line) {
+                continue;
+            }
+        }
+    }
+    // Flush last diagnostic
+    flush(&current_file, &current_msg, current_is_error,
+          &mut errors_by_file, &mut warnings_by_file);
+
+    // Render
+    let mut out: Vec<String> = Vec::new();
+
+    let total_errors: usize = errors_by_file.values().map(|v| v.len()).sum();
+    let total_warnings: usize = warnings_by_file.values().map(|v| v.len()).sum();
+
+    // Summary header
+    out.push(format!(
+        "// Build: {} error(s), {} warning(s)",
+        total_errors, total_warnings
+    ));
+
+    // Errors grouped by file
+    for (file, msgs) in &errors_by_file {
+        let file_display = if file.is_empty() { "(unknown)" } else { file.as_str() };
+        out.push(format!("\n{} ({} error(s)):", file_display, msgs.len()));
+        for m in msgs {
+            out.push(format!("  {m}"));
+        }
+    }
+
+    // Warnings grouped by file (non-aggressive: show warnings too)
+    if !_aggressive || total_errors == 0 {
+        for (file, msgs) in &warnings_by_file {
+            let file_display = if file.is_empty() { "(unknown)" } else { file.as_str() };
+            out.push(format!("\n{} ({} warning(s)):", file_display, msgs.len()));
+            for m in msgs {
+                out.push(format!("  {m}"));
+            }
+        }
+    }
+
+    // Status lines
+    if let Some(fin) = &finish_line {
+        out.push(format!("\n{fin}"));
+    }
+    if let Some(err) = &error_summary {
+        out.push(format!("{err}"));
+    }
+
+    out.join("\n")
+}
+
+fn clean_tsc_output(s: &str, _aggressive: bool) -> String {
+    // Group errors by TS error code: BTreeMap<code, Vec<(file, line, message)>>
+    let re = re_tsc_error_line();
+    let mut by_code: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut other_lines: Vec<String> = Vec::new();
+
+    for line in s.lines() {
+        if let Some(caps) = re.captures(line) {
+            let file = caps.get(1).map_or("", |m| m.as_str());
+            let ln = caps.get(2).map_or("", |m| m.as_str());
+            let code = caps.get(5).map_or("TS?", |m| m.as_str()).to_string();
+            let msg = caps.get(6).map_or("", |m| m.as_str());
+            by_code
+                .entry(code)
+                .or_default()
+                .push(format!("{}:{} — {}", file, ln, msg));
+        } else if !line.trim().is_empty() {
+            other_lines.push(line.to_string());
+        }
+    }
+
+    let total: usize = by_code.values().map(|v| v.len()).sum();
+    let mut out = vec![format!("// TypeScript: {} error(s)", total)];
+
+    for (code, occurrences) in &by_code {
+        let count = occurrences.len();
+        if count == 1 {
+            out.push(format!("\n{code}: {}", occurrences[0]));
+        } else {
+            // Show first message as representative, list all locations
+            let first_msg = occurrences[0]
+                .split(" — ")
+                .nth(1)
+                .unwrap_or(&occurrences[0]);
+            out.push(format!("\n{code} ({count}×): {first_msg}"));
+            for loc in occurrences {
+                let location = loc.split(" — ").next().unwrap_or(loc);
+                out.push(format!("  {location}"));
+            }
+        }
+    }
+
+    for l in &other_lines {
+        out.push(l.clone());
+    }
+
+    out.join("\n")
+}
+
+fn clean_eslint_output(s: &str, aggressive: bool) -> String {
+    // ESLint output: file path lines followed by "  line:col  error/warning  msg  rule"
+    // Group violations by rule
+    let re_violation = re_eslint_violation();
+    let mut by_rule: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut current_file = String::new();
+    let mut summary_line: Option<String> = None;
+
+    for line in s.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Summary line (last line): "✖ 42 problems (30 errors, 12 warnings)"
+        if trimmed.starts_with('✖') || trimmed.starts_with('✓') || trimmed.contains("problem") {
+            summary_line = Some(trimmed.to_string());
+            continue;
+        }
+        // File path line (no leading whitespace, ends with .js/.ts/.tsx etc.)
+        if !line.starts_with(' ') && !line.starts_with('\t') {
+            current_file = trimmed.to_string();
+            continue;
+        }
+        // Violation line
+        if let Some(caps) = re_violation.captures(line) {
+            let severity = caps.get(3).map_or("", |m| m.as_str());
+            let rule = caps.get(5).map_or("unknown", |m| m.as_str()).to_string();
+            let lnum = caps.get(1).map_or("?", |m| m.as_str());
+            let msg = caps.get(4).map_or("", |m| m.as_str());
+            if aggressive && severity == "warning" {
+                continue; // drop warnings in aggressive mode
+            }
+            by_rule
+                .entry(rule)
+                .or_default()
+                .push(format!("{}:{} {}", current_file, lnum, msg));
+        }
+    }
+
+    let total: usize = by_rule.values().map(|v| v.len()).sum();
+    let mut out = vec![format!("// ESLint: {} violation(s)", total)];
+    for (rule, locs) in &by_rule {
+        let count = locs.len();
+        if count == 1 {
+            out.push(format!("  {rule}: {}", locs[0]));
+        } else {
+            out.push(format!("  {rule} ({count}×):"));
+            for loc in locs.iter().take(3) {
+                out.push(format!("    {loc}"));
+            }
+            if count > 3 {
+                out.push(format!("    ... {} more", count - 3));
+            }
+        }
+    }
+    if let Some(s) = summary_line {
+        out.push(format!("\n{s}"));
+    }
+    out.join("\n")
+}
+
+fn re_eslint_violation() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        // "  12:5  error  message text  rule/name"
+        Regex::new(r"^\s+(\d+):(\d+)\s+(error|warning)\s+(.+?)\s{2,}([\w/@-]+(?:/[\w-]+)*)\s*$")
+            .unwrap()
+    })
+}
+
 // ── JSON ──────────────────────────────────────────────────────────────────────
 
-fn clean_json(s: &str) -> String {
+fn clean_json(s: &str, aggressive: bool) -> String {
     match serde_json::from_str::<serde_json::Value>(s) {
         Ok(val) => {
-            let compacted = compact_json_arrays(val);
-            serde_json::to_string_pretty(&compacted).unwrap_or_else(|_| s.to_string())
+            let val = json_extract_error_context(val);
+            let val = json_prune_empty(val);
+            let val = json_dedup_array_objects(val, if aggressive { 1 } else { 2 });
+            let val = json_collapse_single_child_paths(val);
+            serde_json::to_string_pretty(&val).unwrap_or_else(|_| s.to_string())
         }
         Err(_) => clean_plain(s),
     }
 }
 
-fn compact_json_arrays(val: serde_json::Value) -> serde_json::Value {
+/// If root object has error-signal keys, keep only those + id fields.
+fn json_extract_error_context(val: serde_json::Value) -> serde_json::Value {
+    use serde_json::{Map, Value};
+    const ERROR_KEYS: &[&str] = &[
+        "error", "errors", "message", "code", "status",
+        "detail", "details", "description", "trace", "stack",
+    ];
+    const ID_KEYS: &[&str] = &["id", "request_id", "trace_id", "correlation_id"];
+
+    if let Value::Object(ref map) = val {
+        let has_error = map.keys().any(|k| ERROR_KEYS.contains(&k.as_str()));
+        if has_error {
+            let mut extracted: Map<String, Value> = map
+                .iter()
+                .filter(|(k, _)| {
+                    ERROR_KEYS.contains(&k.as_str()) || ID_KEYS.contains(&k.as_str())
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            let omitted = map.len().saturating_sub(extracted.len());
+            if omitted > 0 {
+                extracted.insert(
+                    "_itk_omitted".to_string(),
+                    Value::String(format!("{omitted} non-error fields omitted")),
+                );
+            }
+            return Value::Object(extracted);
+        }
+    }
+    val
+}
+
+/// Remove null values and empty arrays/objects recursively.
+fn json_prune_empty(val: serde_json::Value) -> serde_json::Value {
     use serde_json::Value;
     match val {
+        Value::Object(map) => {
+            let pruned: serde_json::Map<String, Value> = map
+                .into_iter()
+                .filter(|(_, v)| match v {
+                    Value::Null => false,
+                    Value::Array(a) if a.is_empty() => false,
+                    Value::Object(o) if o.is_empty() => false,
+                    _ => true,
+                })
+                .map(|(k, v)| (k, json_prune_empty(v)))
+                .collect();
+            Value::Object(pruned)
+        }
         Value::Array(arr) => {
+            Value::Array(arr.into_iter().map(json_prune_empty).collect())
+        }
+        other => other,
+    }
+}
+
+/// If an array contains N objects all sharing the same key schema, show only
+/// `show_count` examples plus a count marker.
+fn json_dedup_array_objects(val: serde_json::Value, show_count: usize) -> serde_json::Value {
+    use serde_json::Value;
+    use std::collections::BTreeSet;
+
+    match val {
+        Value::Array(arr) if arr.len() > show_count + 1 => {
+            // Check if all elements are objects with identical key sets
+            let schemas: Vec<BTreeSet<String>> = arr
+                .iter()
+                .filter_map(|v| {
+                    v.as_object()
+                        .map(|o| o.keys().cloned().collect::<BTreeSet<_>>())
+                })
+                .collect();
+            let all_objects = schemas.len() == arr.len();
+            let all_same_schema = all_objects
+                && !schemas.is_empty()
+                && schemas.windows(2).all(|w| w[0] == w[1]);
+
+            if all_same_schema {
+                let total = arr.len();
+                let shown = show_count.min(total);
+                let mut result: Vec<Value> = arr
+                    .into_iter()
+                    .take(shown)
+                    .map(|v| json_dedup_array_objects(v, show_count))
+                    .collect();
+                let hidden = total - shown;
+                if hidden > 0 {
+                    result.push(Value::String(format!(
+                        "... {hidden} more objects with same structure"
+                    )));
+                }
+                Value::Array(result)
+            } else {
+                // Recurse into elements but keep all
+                Value::Array(
+                    arr.into_iter()
+                        .map(|v| json_dedup_array_objects(v, show_count))
+                        .collect(),
+                )
+            }
+        }
+        Value::Array(arr) => {
+            // Also compact primitive arrays > 20 (original behaviour)
             let all_primitive = arr.iter().all(|v| !v.is_array() && !v.is_object());
             if all_primitive && arr.len() > 20 {
                 let len = arr.len();
-                let preview: Vec<Value> = arr.into_iter().take(3).collect();
-                let mut result = preview;
+                let mut result: Vec<Value> = arr.into_iter().take(3).collect();
                 result.push(Value::String(format!("... [{} more items]", len - 3)));
                 Value::Array(result)
             } else {
-                Value::Array(arr.into_iter().map(compact_json_arrays).collect())
+                Value::Array(
+                    arr.into_iter()
+                        .map(|v| json_dedup_array_objects(v, show_count))
+                        .collect(),
+                )
             }
         }
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(k, v)| (k, json_dedup_array_objects(v, show_count)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// Collapse single-child object chains: {"a": {"b": {"c": 42}}} → {"a.b.c": 42}
+fn json_collapse_single_child_paths(val: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+
+    match val {
         Value::Object(map) => {
-            Value::Object(map.into_iter().map(|(k, v)| (k, compact_json_arrays(v))).collect())
+            // Recurse first
+            let map: serde_json::Map<String, Value> = map
+                .into_iter()
+                .map(|(k, v)| (k, json_collapse_single_child_paths(v)))
+                .collect();
+
+            // If this object has exactly one key and its value is also a single-key object,
+            // merge the key paths
+            if map.len() == 1 {
+                let (k, v) = map.into_iter().next().unwrap();
+                if let Value::Object(ref inner) = v {
+                    if inner.len() == 1 {
+                        let (ik, iv) = inner.clone().into_iter().next().unwrap();
+                        let merged = format!("{k}.{ik}");
+                        let mut result = serde_json::Map::new();
+                        result.insert(merged, iv);
+                        return Value::Object(result);
+                    }
+                }
+                let mut result = serde_json::Map::new();
+                result.insert(k, v);
+                return Value::Object(result);
+            }
+            Value::Object(map)
+        }
+        Value::Array(arr) => {
+            Value::Array(
+                arr.into_iter()
+                    .map(json_collapse_single_child_paths)
+                    .collect(),
+            )
         }
         other => other,
     }
@@ -554,15 +983,58 @@ fn compact_json_arrays(val: serde_json::Value) -> serde_json::Value {
 
 // ── YAML ──────────────────────────────────────────────────────────────────────
 
-fn clean_yaml(s: &str) -> String {
+/// Default key=value pairs commonly found in Kubernetes/Docker/CI YAML.
+/// Only suppressed in aggressive mode to avoid hiding intentional values.
+const YAML_DEFAULTS: &[(&str, &str)] = &[
+    ("enabled", "true"),
+    ("disabled", "false"),
+    ("replicas", "1"),
+    ("debug", "false"),
+    ("verbose", "false"),
+    ("restart", "always"),
+    ("protocol", "http"),
+    ("ssl", "false"),
+    ("tls", "false"),
+];
+
+/// Documentation-only field keys in OpenAPI / JSON Schema YAML.
+const YAML_DOC_KEYS: &[&str] = &[
+    "description",
+    "title",
+    "summary",
+    "example",
+    "examples",
+    "$comment",
+    "x-description",
+];
+
+fn clean_yaml(s: &str, aggressive: bool) -> String {
     let mut out = Vec::new();
     let mut blank_run = 0u32;
+    // State for skipping multi-line block scalar values under doc keys
+    let mut skip_block = false;
+    let mut block_indent = 0usize;
 
     for line in s.lines() {
         let trimmed = line.trim();
+        let indent = line.len() - line.trim_start().len();
+
+        // Exit block-scalar skip when we outdent
+        if skip_block {
+            if !trimmed.is_empty() && indent <= block_indent {
+                skip_block = false;
+                // Fall through to normal processing of this line
+            } else {
+                continue;
+            }
+        }
+
+        // Strip comment-only lines
         if trimmed.starts_with('#') {
             continue;
         }
+
+        // Blank line handling
         if trimmed.is_empty() {
             blank_run += 1;
             if blank_run <= 1 {
@@ -571,8 +1043,44 @@ fn clean_yaml(s: &str) -> String {
             continue;
         }
         blank_run = 0;
-        let leading = line.len() - line.trim_start().len();
-        let normalized_indent = ((leading + 1) / 2) * 2;
+
+        // Aggressive-mode filters
+        if aggressive {
+            // Skip documentation keys (description, title, example, etc.)
+            let is_doc_key = YAML_DOC_KEYS.iter().any(|dk| {
+                trimmed == *dk
+                    || trimmed.starts_with(&format!("{dk}:"))
+                    || trimmed.starts_with(&format!("{dk} :"))
+            });
+            if is_doc_key {
+                // Check if value is a block scalar (|, >) — skip continuation lines too
+                let after_colon = trimmed
+                    .splitn(2, ':')
+                    .nth(1)
+                    .map(|s| s.trim())
+                    .unwrap_or("");
+                if after_colon == "|" || after_colon == ">" || after_colon.is_empty() {
+                    skip_block = true;
+                    block_indent = indent;
+                }
+                continue;
+            }
+
+            // Skip known default key=value pairs (guard: never skip lines with & anchor)
+            if !trimmed.contains('&') {
+                let is_default = YAML_DEFAULTS.iter().any(|(key, val)| {
+                    trimmed == format!("{key}: {val}")
+                        || trimmed == format!("{key}: \"{val}\"")
+                        || trimmed == format!("{key}: '{val}'")
+                });
+                if is_default {
+                    continue;
+                }
+            }
+        }
+
+        // Normalize indentation to even multiples of 2
+        let normalized_indent = ((indent + 1) / 2) * 2;
         out.push(format!("{:indent$}{trimmed}", "", indent = normalized_indent));
     }
     out.join("\n")
@@ -580,13 +1088,199 @@ fn clean_yaml(s: &str) -> String {
 
 // ── CODE ──────────────────────────────────────────────────────────────────────
 
-fn clean_code(s: &str, lang: &str) -> String {
+fn clean_code(s: &str, lang: &str, aggressive: bool) -> String {
     let trimmed = s.trim();
-    if trimmed.starts_with("```") {
-        normalize_fenced_code(trimmed)
+
+    // Detect if content is already fenced
+    let (content, lang_tag) = if trimmed.starts_with("```") {
+        let first_line = trimmed.lines().next().unwrap_or("```");
+        let detected_lang = first_line.trim_start_matches('`').trim();
+        let inner = trimmed
+            .lines()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let inner = inner.trim_end_matches('`').trim_end();
+        (inner.to_string(), if detected_lang.is_empty() { lang.to_string() } else { detected_lang.to_string() })
     } else {
-        format!("```{lang}\n{}\n```", collapse_blank_lines(trimmed, 2))
+        (trimmed.to_string(), lang.to_string())
+    };
+
+    // Apply cleaning passes
+    let content = code_strip_doc_block_comments(&content, &lang_tag);
+    let content = code_strip_trailing_comments(&content, &lang_tag);
+    let content = code_collapse_imports(&content, &lang_tag);
+    // In aggressive mode, also strip single-line doc comments (///, //!)
+    let content = if aggressive {
+        code_strip_line_doc_comments(&content, &lang_tag)
+    } else {
+        content
+    };
+    let content = collapse_blank_lines(&content, if aggressive { 1 } else { 2 });
+
+    format!("```{lang_tag}\n{content}\n```")
+}
+
+/// Remove block doc comments: /** ... */ and /*! ... */
+fn code_strip_doc_block_comments(s: &str, _lang: &str) -> String {
+    let mut out = Vec::new();
+    let mut in_doc_block = false;
+
+    for line in s.lines() {
+        let trimmed = line.trim();
+        if in_doc_block {
+            if trimmed.contains("*/") {
+                in_doc_block = false;
+            }
+            // Drop the line
+            continue;
+        }
+        // Detect start of block doc comment
+        if trimmed.starts_with("/**") || trimmed.starts_with("/*!") {
+            // Single-line: /** comment */
+            if trimmed.ends_with("*/") && trimmed.len() > 4 {
+                continue; // single-line doc block — drop
+            }
+            in_doc_block = true;
+            continue;
+        }
+        out.push(line.to_string());
     }
+    out.join("\n")
+}
+
+/// Remove single-line doc comments (///, //!) — only in aggressive mode for Rust
+fn code_strip_line_doc_comments(s: &str, lang: &str) -> String {
+    if lang != "rust" {
+        return s.to_string();
+    }
+    s.lines()
+        .filter(|l| {
+            let t = l.trim();
+            !t.starts_with("///") && !t.starts_with("//!")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Remove trailing inline comments from code lines.
+/// Guards against stripping `//` inside string literals (simple heuristic).
+fn code_strip_trailing_comments(s: &str, lang: &str) -> String {
+    let comment_prefix = match lang {
+        "python" | "ruby" | "bash" | "sh" | "yaml" => "#",
+        "rust" | "javascript" | "typescript" | "js" | "ts"
+        | "go" | "java" | "c" | "cpp" | "csharp" | "swift" | "kotlin" => "//",
+        _ => return s.to_string(), // unknown lang — don't touch
+    };
+
+    s.lines()
+        .map(|line| strip_trailing_comment_from_line(line, comment_prefix))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn strip_trailing_comment_from_line<'a>(line: &'a str, prefix: &str) -> &'a str {
+    // Don't strip from blank or comment-only lines
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with(prefix) {
+        return line;
+    }
+
+    let prefix_bytes = prefix.as_bytes();
+    let bytes = line.as_bytes();
+    let mut in_string = false;
+    let mut string_char = b'"';
+    let mut i = 0;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            if b == b'\\' {
+                i += 2; // skip escaped char
+                continue;
+            }
+            if b == string_char {
+                in_string = false;
+            }
+        } else {
+            if b == b'"' || b == b'\'' || b == b'`' {
+                in_string = true;
+                string_char = b;
+            } else if bytes[i..].starts_with(prefix_bytes) {
+                // Found comment start outside string — strip and trim trailing whitespace
+                return line[..i].trim_end();
+            }
+        }
+        i += 1;
+    }
+    line
+}
+
+/// Collapse import/use/from blocks of ≥ 4 consecutive lines into a summary.
+fn code_collapse_imports(s: &str, lang: &str) -> String {
+    let import_prefix: &[&str] = match lang {
+        "rust" => &["use "],
+        "python" => &["import ", "from "],
+        "typescript" | "javascript" | "js" | "ts" => &["import "],
+        "go" | "java" | "kotlin" => &["import "],
+        _ => return s.to_string(),
+    };
+
+    let lines: Vec<&str> = s.lines().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+
+    while i < lines.len() {
+        // Check if this starts an import block
+        let line = lines[i];
+        let is_import = import_prefix.iter().any(|p| line.trim_start().starts_with(p));
+
+        if is_import {
+            // Collect the full run
+            let start = i;
+            while i < lines.len()
+                && import_prefix
+                    .iter()
+                    .any(|p| lines[i].trim_start().starts_with(p))
+            {
+                i += 1;
+            }
+            let count = i - start;
+            if count >= 4 {
+                // Extract module names for display (up to 4)
+                let names: Vec<&str> = lines[start..i]
+                    .iter()
+                    .take(4)
+                    .map(|l| {
+                        // Extract first identifier after the keyword
+                        let after_kw = import_prefix
+                            .iter()
+                            .find_map(|p| l.trim_start().strip_prefix(p))
+                            .unwrap_or(l.trim_start());
+                        after_kw
+                            .split(|c: char| !c.is_alphanumeric() && c != '_' && c != ':')
+                            .next()
+                            .unwrap_or("")
+                    })
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let names_str = names.join(", ");
+                let ellipsis = if count > 4 { ", ..." } else { "" };
+                out.push(format!(
+                    "// [{count} imports: {names_str}{ellipsis}]"
+                ));
+            } else {
+                // Too few — emit as-is
+                for l in &lines[start..i] {
+                    out.push(l.to_string());
+                }
+            }
+        } else {
+            out.push(line.to_string());
+            i += 1;
+        }
+    }
+    out.join("\n")
 }
 
 fn normalize_fenced_code(s: &str) -> String {
@@ -609,6 +1303,121 @@ fn collapse_blank_lines(s: &str, max_blanks: usize) -> String {
         }
     }
     out.join("\n")
+}
+
+// ── MARKDOWN ──────────────────────────────────────────────────────────────────
+
+const NOISE_SECTIONS: &[&str] = &[
+    "installation",
+    "getting started",
+    "prerequisites",
+    "requirements",
+    "contributing",
+    "contributors",
+    "code of conduct",
+    "license",
+    "changelog",
+    "releases",
+    "roadmap",
+    "acknowledgements",
+    "acknowledgments",
+    "credits",
+    "sponsor",
+];
+
+fn clean_markdown(s: &str, aggressive: bool) -> String {
+    // Pass 1: remove HTML comments <!-- ... -->
+    let s = re_html_comment()
+        .replace_all(s, "")
+        .into_owned();
+
+    let lines: Vec<&str> = s.lines().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut skip_section = false;
+    let mut skip_section_level = 0usize;
+
+    for line in &lines {
+        let trimmed = line.trim();
+
+        // Count leading #s for heading level
+        let heading_level = if trimmed.starts_with('#') {
+            trimmed.chars().take_while(|c| *c == '#').count()
+        } else {
+            0
+        };
+
+        // End of a skipped section: new heading at same or higher level
+        if skip_section && heading_level > 0 && heading_level <= skip_section_level {
+            skip_section = false;
+        }
+
+        if skip_section {
+            continue;
+        }
+
+        // Aggressive: skip known noise sections
+        if aggressive && heading_level >= 2 {
+            let heading_text = trimmed
+                .trim_start_matches('#')
+                .trim()
+                .to_lowercase();
+            if NOISE_SECTIONS.iter().any(|s| heading_text.starts_with(s)) {
+                skip_section = true;
+                skip_section_level = heading_level;
+                continue;
+            }
+        }
+
+        // Skip badge lines: standalone lines that are only image/badge markdown
+        // Covers: ![alt](url), [![alt](img)](link), [![alt](img)](link)
+        if is_badge_line(trimmed) {
+            continue;
+        }
+
+        // Convert H3+ headings to bold bullet points
+        if heading_level >= 3 {
+            let heading_text = trimmed.trim_start_matches('#').trim();
+            out.push(format!("- **{heading_text}**"));
+            continue;
+        }
+
+        out.push(line.to_string());
+    }
+
+    // Collapse excessive blank lines
+    collapse_blank_lines(&out.join("\n"), 1)
+}
+
+fn is_badge_line(line: &str) -> bool {
+    // A badge line is one where the entire trimmed content consists of
+    // markdown image/link patterns. Heuristic: line contains "![" or starts with
+    // "[![" and has no plain text content outside of markdown link syntax.
+    // Patterns:
+    //   ![alt](url)
+    //   [![alt](img_url)](link_url)
+    //   Multiple badges on one line
+    if !line.contains("![") {
+        return false;
+    }
+    // Remove all markdown image-link patterns and check nothing substantive remains
+    let cleaned = re_badge_pattern()
+        .replace_all(line, "")
+        .trim()
+        .to_string();
+    cleaned.is_empty()
+}
+
+fn re_badge_pattern() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    // Matches: [![alt](img)](link) or ![alt](url)
+    R.get_or_init(|| {
+        Regex::new(r#"\[?!\[[^\]]*\]\([^)]*\)\]?(?:\([^)]*\))?"#).unwrap()
+    })
+}
+
+fn re_html_comment() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| Regex::new(r"(?s)<!--.*?-->").unwrap())
 }
 
 // ── PLAIN TEXT ────────────────────────────────────────────────────────────────
@@ -673,9 +1482,23 @@ fn summarize(content: &str, ct: &ContentType) -> String {
             let lines = content.lines().count();
             format!("// {lang} — {lines} lines")
         }
+        ContentType::BuildOutput(tool) => {
+            let errors = content.lines().filter(|l| l.contains("error")).count();
+            format!("// Build output ({tool:?}) — cleaned by itk, {errors} error line(s)")
+        }
+        ContentType::Markdown => {
+            let words = content.split_whitespace().count();
+            format!("// Markdown — ~{words} words (cleaned by itk)")
+        }
         ContentType::PlainText => {
             let words = content.split_whitespace().count();
             format!("// Plain text — ~{words} words")
         }
     }
+}
+
+// Keep this to avoid breaking normalize_fenced_code call if needed elsewhere
+#[allow(dead_code)]
+fn _normalize_fenced_code_unused(s: &str) -> String {
+    normalize_fenced_code(s)
 }
