@@ -1,0 +1,1043 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>itk — Frame and compress content for LLMs</title>
+  <meta name="description" content="itk frames, compresses, and prompt-wraps content before pasting into LLMs. 15 content types auto-detected, cleaned in under 100ms with context headers.">
+  <meta property="og:title" content="itk — Input Token Killer">
+  <meta property="og:description" content="Frame, compress, and prompt-wrap content before pasting into LLMs. 10-80% token savings across 15 content types.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://natekali.github.io/itk">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'><path d='M4 4l5 4-5 4' stroke='%23a78bfa' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/><path d='M20 4l-5 4 5 4' stroke='%23a78bfa' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/><path d='M8 20h8' stroke='%23a78bfa' stroke-width='2.5' stroke-linecap='round'/><path d='M14 2l-4 10' stroke='%23e879f9' stroke-width='2' stroke-linecap='round' opacity='0.7'/></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #060b18;
+      --bg-alt: #0c1225;
+      --bg-card: #0f1629;
+      --bg-card-hover: #151d35;
+      --border: #1a2344;
+      --border-light: #243056;
+      --text: #e2e8f0;
+      --text-bright: #f8fafc;
+      --text-muted: #64748b;
+      --text-dim: #475569;
+      --accent: #a78bfa;
+      --accent-dim: rgba(167, 139, 250, 0.12);
+      --accent-glow: rgba(167, 139, 250, 0.25);
+      --accent-strong: rgba(167, 139, 250, 0.4);
+      --cyan: #38bdf8;
+      --cyan-dim: rgba(56, 189, 248, 0.10);
+      --green: #00e599;
+      --green-dim: rgba(0, 229, 153, 0.10);
+      --orange: #fb923c;
+      --orange-dim: rgba(251, 146, 60, 0.1);
+      --red: #f87171;
+      --font-body: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+      --max-w: 1140px;
+      --radius: 12px;
+      --radius-lg: 16px;
+    }
+
+    html { scroll-behavior: smooth; overflow-x: hidden; }
+
+    body {
+      font-family: var(--font-body);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+    }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, pre { font-family: var(--font-mono); }
+
+    .reveal {
+      opacity: 0;
+      transform: translateY(24px);
+      transition: opacity 0.6s ease, transform 0.6s ease;
+    }
+    .reveal.visible { opacity: 1; transform: translateY(0); }
+
+    .stagger-reveal > * {
+      opacity: 0;
+      transform: translateY(16px);
+      transition: opacity 0.5s ease, transform 0.5s ease;
+    }
+    .stagger-reveal.visible > * { opacity: 1; transform: translateY(0); }
+
+    /* Animations */
+    @keyframes blink { 50% { opacity: 0; } }
+    @keyframes fadeSlide { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes pulse-glow {
+      0%, 100% { box-shadow: 0 0 0 0 var(--accent-strong); }
+      50% { box-shadow: 0 0 14px 4px rgba(167, 139, 250, 0.15); }
+    }
+    @keyframes float {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-4px); }
+    }
+    @keyframes shimmer {
+      0% { background-position: -200% center; }
+      100% { background-position: 200% center; }
+    }
+
+    /* ─── Nav ─── */
+    .nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+      background: rgba(6, 11, 24, 0.82);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-inner {
+      max-width: var(--max-w); margin: 0 auto; padding: 0 24px;
+      height: 60px; display: flex; align-items: center; justify-content: space-between;
+    }
+    .nav-logo { display: flex; align-items: center; gap: 8px; color: var(--text-bright); font-weight: 700; font-size: 1.15rem; }
+    .nav-logo:hover { text-decoration: none; }
+    .nav-links { display: flex; align-items: center; gap: 24px; }
+    .nav-links a { color: var(--text-muted); font-size: 0.875rem; font-weight: 500; transition: color 0.2s; }
+    .nav-links a:hover { color: var(--text); text-decoration: none; }
+    .nav-link-rtk { color: var(--green) !important; }
+
+    /* ─── Buttons ─── */
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 10px 22px; border-radius: 8px; font-weight: 600; font-size: 0.9rem;
+      font-family: var(--font-body); transition: all 0.25s;
+      border: 1px solid transparent; cursor: pointer;
+    }
+    .btn:hover { text-decoration: none; }
+    .btn-sm { padding: 6px 14px; font-size: 0.8rem; }
+    .btn-primary { background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: 700; }
+    .btn-primary:hover { background: #c4b5fd; border-color: #c4b5fd; transform: translateY(-2px); box-shadow: 0 4px 24px var(--accent-glow); }
+    .btn-ghost { background: transparent; color: var(--text-muted); border-color: var(--border); }
+    .btn-ghost:hover { color: var(--text); border-color: var(--text-muted); transform: translateY(-1px); }
+
+    /* ─── Hero ─── */
+    .hero { max-width: var(--max-w); margin: 0 auto; padding: 140px 24px 60px; text-align: center; position: relative; }
+    .hero::before {
+      content: ''; position: absolute; top: 40px; left: 50%; transform: translateX(-50%);
+      width: 700px; height: 500px;
+      background: radial-gradient(ellipse, var(--accent-glow) 0%, rgba(56,189,248,0.06) 40%, transparent 70%);
+      pointer-events: none; opacity: 0.5;
+    }
+
+    .hero-badges { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-bottom: 32px; position: relative; }
+    .hero-badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 6px 16px; border-radius: 100px; font-size: 0.78rem; font-weight: 600; letter-spacing: 0.01em;
+      animation: pulse-glow 3s ease-in-out infinite;
+    }
+    .badge-oss { background: var(--accent-dim); color: var(--accent); font-size: 0.85rem; padding: 8px 20px; }
+
+    .hero h1 { font-size: clamp(2.4rem, 5.5vw, 3.8rem); font-weight: 800; line-height: 1.08; letter-spacing: -0.035em; margin-bottom: 20px; position: relative; }
+    .gradient-text {
+      background: linear-gradient(135deg, var(--accent) 0%, #e879f9 50%, var(--cyan) 100%);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+      filter: drop-shadow(0 0 30px rgba(167, 139, 250, 0.3));
+    }
+
+    .hero-sub { font-size: 1.15rem; color: var(--text-muted); max-width: 640px; margin: 0 auto 36px; line-height: 1.7; position: relative; }
+    .hero-sub strong { color: var(--text); }
+
+    .hero-stats { display: flex; align-items: center; justify-content: center; gap: 36px; margin-bottom: 36px; position: relative; }
+    .stat { text-align: center; }
+    .stat-value { display: block; font-family: var(--font-mono); font-size: 1.9rem; font-weight: 700; color: var(--accent); letter-spacing: -0.02em; }
+    .stat-label { font-size: 0.78rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 500; }
+    .stat-sep { width: 1px; height: 40px; background: var(--border); }
+
+    .hero-cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-bottom: 48px; position: relative; }
+
+    /* ─── Features Grid ─── */
+    .features-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; max-width: 900px; margin: 0 auto 20px; }
+    .feature-card {
+      padding: 24px 20px; border: 1px solid var(--border); border-radius: var(--radius);
+      background: var(--bg-card); text-align: center;
+      transition: border-color 0.3s, transform 0.3s, box-shadow 0.3s;
+    }
+    .feature-card:hover { border-color: rgba(167,139,250,0.3); transform: translateY(-3px); box-shadow: 0 0 24px rgba(167,139,250,0.08); }
+    .feature-icon { width: 40px; height: 40px; margin: 0 auto 12px; border-radius: 10px; display: flex; align-items: center; justify-content: center; }
+    .feature-icon.frame { background: var(--accent-dim); }
+    .feature-icon.prompt { background: var(--green-dim); }
+    .feature-icon.compress { background: var(--cyan-dim); }
+    .feature-icon.watch { background: var(--orange-dim); }
+    .feature-card h4 { font-size: 0.95rem; font-weight: 700; color: var(--text-bright); margin-bottom: 6px; }
+    .feature-card p { font-size: 0.8rem; color: var(--text-muted); line-height: 1.5; }
+
+    /* ─── Terminal ─── */
+    .terminal-demo {
+      max-width: 680px; margin: 0 auto; border: 1px solid var(--border); border-radius: var(--radius);
+      background: var(--bg-card); overflow: hidden; position: relative;
+      box-shadow: 0 0 60px rgba(167,139,250,0.07), 0 4px 24px rgba(0,0,0,0.3);
+    }
+    .terminal-header { display: flex; align-items: center; gap: 8px; padding: 12px 16px; background: rgba(15,22,41,0.8); border-bottom: 1px solid var(--border); }
+    .terminal-dot { width: 10px; height: 10px; border-radius: 50%; }
+    .terminal-dot.r { background: #ef4444; } .terminal-dot.y { background: #eab308; } .terminal-dot.g { background: #22c55e; }
+    .terminal-title { margin-left: 8px; font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); }
+    .terminal-body { padding: 20px; font-family: var(--font-mono); font-size: 0.78rem; line-height: 1.7; min-height: 200px; }
+    .terminal-body .prompt { color: var(--accent); font-weight: 600; }
+    .terminal-body .cmd { color: var(--text-bright); }
+    .terminal-body .output { color: var(--text-muted); }
+    .terminal-body .highlight { color: var(--accent); font-weight: 600; }
+    .terminal-body .highlight-cyan { color: var(--cyan); }
+    .terminal-body .highlight-green { color: var(--green); }
+    .terminal-body .dim { color: var(--text-dim); }
+    .terminal-body .err { color: var(--red); }
+    .terminal-box { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; margin: 12px 0; background: rgba(0,0,0,0.2); }
+    .terminal-row { display: flex; justify-content: space-between; padding: 2px 0; }
+    .terminal-row .label { color: var(--text-muted); }
+    .terminal-row .value { font-weight: 500; }
+    .terminal-row .value.accent { color: var(--accent); }
+    .terminal-divider { height: 1px; background: var(--border); margin: 8px 0; }
+    .cursor-blink { display: inline-block; width: 8px; height: 16px; background: var(--accent); animation: blink 1s step-end infinite; vertical-align: text-bottom; }
+
+    /* ─── Sections ─── */
+    .section-inner { max-width: var(--max-w); margin: 0 auto; padding: 0 24px; }
+    section { padding: 80px 0; }
+    section h2 { font-size: clamp(1.75rem, 4vw, 2.5rem); font-weight: 800; text-align: center; letter-spacing: -0.025em; margin-bottom: 12px; color: var(--text-bright); }
+    .section-sub { text-align: center; color: var(--text-muted); font-size: 1.05rem; max-width: 580px; margin: 0 auto 52px; }
+
+    /* ─── Comparison ─── */
+    .comparison { background: linear-gradient(180deg, var(--bg-alt) 0%, var(--bg) 100%); }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); -webkit-overflow-scrolling: touch; }
+    .compare-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; min-width: 800px; }
+    .compare-table th { text-align: left; padding: 14px 18px; background: var(--bg-card); color: var(--text-muted); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--border); }
+    .compare-table td { padding: 12px 18px; border-bottom: 1px solid var(--border); color: var(--text-muted); }
+    .compare-table tr:last-child td { border-bottom: none; }
+    .compare-table tbody tr:hover td { background: var(--bg-card); }
+    .compare-table td:first-child { color: var(--text-bright); font-weight: 600; }
+    .compare-table td:nth-child(2), .compare-table td:nth-child(3) { font-family: var(--font-mono); font-size: 0.78rem; }
+    .compare-table td:nth-child(4) { font-weight: 700; font-family: var(--font-mono); }
+    .savings-high { color: var(--green) !important; }
+    .savings-mid { color: var(--cyan) !important; }
+    .savings-low { color: var(--text-muted) !important; }
+
+    /* ─── Demo Slideshow ─── */
+    .demo-section { background: var(--bg); }
+    .slideshow { position: relative; }
+    .slideshow-nav { display: flex; gap: 8px; justify-content: center; margin-bottom: 24px; flex-wrap: wrap; }
+    .slide-tab { padding: 6px 16px; border-radius: 100px; border: 1px solid var(--border); background: transparent; color: var(--text-muted); font-family: var(--font-mono); font-size: 0.78rem; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+    .slide-tab:hover { border-color: var(--text-muted); color: var(--text); }
+    .slide-tab.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+    .slideshow-viewport { position: relative; min-height: 380px; }
+    .slide { display: none; animation: fadeSlide 0.3s ease; }
+    .slide.active { display: block; }
+    .slideshow-controls { display: flex; align-items: center; justify-content: center; gap: 16px; margin-top: 24px; }
+    .slide-arrow { display: flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-muted); cursor: pointer; transition: all 0.2s; }
+    .slide-arrow:hover { border-color: var(--accent); color: var(--accent); }
+    .slide-dots { display: flex; gap: 8px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); cursor: pointer; transition: all 0.2s; }
+    .dot.active { background: var(--accent); box-shadow: 0 0 8px var(--accent-glow); }
+    .dot:hover { background: var(--text-muted); }
+
+    .demo-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    .demo-card { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--bg-card); min-width: 0; }
+    .demo-card-header { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 0.78rem; }
+    .demo-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .demo-dot.red { background: #f87171; } .demo-dot.green { background: var(--accent); }
+    .demo-label { font-weight: 600; color: var(--text-muted); font-family: var(--font-mono); font-size: 0.72rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+    .demo-tokens { margin-left: auto; color: var(--text-muted); font-family: var(--font-mono); font-size: 0.68rem; white-space: nowrap; flex-shrink: 0; }
+    .demo-savings { padding: 2px 8px; border-radius: 100px; background: var(--accent-dim); color: var(--accent); font-family: var(--font-mono); font-size: 0.68rem; font-weight: 700; flex-shrink: 0; }
+    .demo-card pre { padding: 14px 16px; overflow-x: auto; font-size: 0.72rem; line-height: 1.55; color: var(--text-muted); max-height: 350px; overflow-y: auto; }
+    .demo-card pre code { font-family: var(--font-mono); white-space: pre; }
+    .demo-after { border-color: rgba(167,139,250,0.25); }
+    .demo-after pre { color: var(--accent); }
+    .truncated { color: var(--text-dim); font-style: italic; }
+
+    /* ─── Watch Section ─── */
+    .watch-section { background: linear-gradient(180deg, var(--bg) 0%, var(--bg-alt) 50%, var(--bg) 100%); position: relative; overflow: hidden; }
+    .watch-section::before {
+      content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      width: 900px; height: 500px;
+      background: radial-gradient(ellipse, rgba(251,146,60,0.06) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .watch-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; align-items: center; max-width: 1000px; margin: 0 auto; }
+    .watch-features { display: flex; flex-direction: column; gap: 20px; }
+    .watch-feature { display: flex; gap: 14px; align-items: flex-start; }
+    .watch-feature-icon {
+      width: 36px; height: 36px; border-radius: 10px; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      background: var(--orange-dim); color: var(--orange);
+    }
+    .watch-feature h4 { font-size: 0.9rem; font-weight: 700; color: var(--text-bright); margin-bottom: 2px; }
+    .watch-feature p { font-size: 0.82rem; color: var(--text-muted); line-height: 1.5; }
+
+    /* ─── Cleaners ─── */
+    .cleaned { background: var(--bg-alt); }
+    .cleaned-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    .cleaned-table th { text-align: left; padding: 14px 18px; background: var(--bg-card); color: var(--text-muted); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--border); }
+    .cleaned-table td { padding: 12px 18px; border-bottom: 1px solid var(--border); color: var(--text-muted); font-size: 0.85rem; }
+    .cleaned-table tr:last-child td { border-bottom: none; }
+    .cleaned-table tbody tr:hover td { background: var(--bg-card); }
+    .cleaned-table td:first-child { color: var(--text-bright); font-weight: 600; }
+    .cleaned-table code { background: var(--bg); padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; color: var(--accent); }
+
+    /* ─── Prompts ─── */
+    .prompts { background: linear-gradient(180deg, var(--bg) 0%, var(--bg-alt) 100%); }
+    .prompts-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; max-width: 1000px; margin: 0 auto; }
+    .prompt-card {
+      padding: 20px; border: 1px solid var(--border); border-radius: var(--radius);
+      background: var(--bg-card); text-align: center;
+      transition: border-color 0.3s, transform 0.3s, box-shadow 0.3s;
+    }
+    .prompt-card:hover { transform: translateY(-3px); border-color: rgba(167,139,250,0.3); box-shadow: 0 4px 16px rgba(167,139,250,0.08); }
+    .prompt-card code { display: block; font-family: var(--font-mono); font-size: 0.85rem; font-weight: 600; color: var(--accent); margin-bottom: 8px; }
+    .prompt-card p { font-size: 0.8rem; color: var(--text-muted); line-height: 1.4; }
+
+    /* ─── Discover & Gain ─── */
+    .discover-section { background: var(--bg-alt); position: relative; overflow: hidden; }
+    .discover-section::before {
+      content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      width: 800px; height: 400px;
+      background: radial-gradient(ellipse, rgba(56,189,248,0.06) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .discover-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; max-width: 1000px; margin: 0 auto; }
+    .discover-grid .terminal-demo { max-width: 100%; }
+
+    /* ─── Pair ─── */
+    .pair { background: var(--bg); position: relative; overflow: hidden; }
+    .pair::before { content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); width: 800px; height: 400px; background: radial-gradient(ellipse, rgba(167,139,250,0.08) 0%, transparent 70%); pointer-events: none; }
+    .pair-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 24px; max-width: 700px; margin: 0 auto; }
+    .pair-card { padding: 32px 28px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); text-align: center; transition: border-color 0.3s, transform 0.3s, box-shadow 0.3s; position: relative; overflow: hidden; }
+    .pair-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px; }
+    .pair-card.rtk::before { background: linear-gradient(90deg, transparent, var(--green), transparent); }
+    .pair-card.itk::before { background: linear-gradient(90deg, transparent, var(--accent), transparent); }
+    .pair-card:hover { transform: translateY(-4px); border-color: var(--border-light); box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
+    .pair-card h3 { font-family: var(--font-mono); font-size: 1.5rem; font-weight: 700; margin-bottom: 8px; }
+    .pair-card.rtk h3 { color: var(--green); } .pair-card.itk h3 { color: var(--accent); }
+    .pair-card p { color: var(--text-muted); font-size: 0.9rem; margin-bottom: 12px; }
+    .pair-card .examples { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-dim); padding-top: 12px; border-top: 1px solid var(--border); }
+
+    /* ─── Install ─── */
+    .install-section { background: linear-gradient(180deg, var(--bg) 0%, var(--bg-alt) 100%); }
+    .install-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; max-width: 900px; margin: 0 auto 40px; }
+    .install-card { padding: 28px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); min-width: 0; }
+    .install-primary { border-color: rgba(167,139,250,0.3); }
+    .install-card h3 { font-size: 1rem; font-weight: 700; margin-bottom: 4px; color: var(--text-bright); }
+    .install-card > p { font-size: 0.8rem; color: var(--text-muted); margin-bottom: 16px; }
+    .code-block { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 11px 14px; display: flex; align-items: center; justify-content: space-between; gap: 10px; overflow-x: auto; min-width: 0; }
+    .code-block code { color: var(--accent); font-size: 0.73rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+    .copy-btn { flex-shrink: 0; background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 4px; border-radius: 4px; transition: color 0.2s; display: flex; }
+    .copy-btn:hover { color: var(--text); } .copy-btn.copied { color: var(--accent); }
+
+    /* ─── Advanced ─── */
+    .advanced-section { background: var(--bg); }
+    .advanced-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; max-width: 1000px; margin: 0 auto; }
+    .adv-card {
+      padding: 24px 20px; border: 1px solid var(--border); border-radius: var(--radius);
+      background: var(--bg-card); text-align: center;
+      transition: border-color 0.3s, transform 0.3s;
+    }
+    .adv-card:hover { border-color: var(--border-light); transform: translateY(-2px); }
+    .adv-card h4 { font-size: 0.9rem; font-weight: 700; color: var(--text-bright); margin-bottom: 6px; }
+    .adv-card p { font-size: 0.78rem; color: var(--text-muted); line-height: 1.5; }
+    .adv-card code { background: var(--bg); padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; color: var(--accent); }
+    .adv-icon { width: 36px; height: 36px; margin: 0 auto 12px; border-radius: 10px; display: flex; align-items: center; justify-content: center; }
+
+    /* ─── CTA ─── */
+    .cta-section { background: linear-gradient(180deg, var(--bg-alt) 0%, var(--bg) 100%); text-align: center; padding: 100px 0; position: relative; overflow: hidden; }
+    .cta-section::before { content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); width: 600px; height: 300px; background: radial-gradient(ellipse, var(--accent-glow) 0%, transparent 70%); pointer-events: none; opacity: 0.3; }
+
+    /* ─── Footer ─── */
+    .footer { border-top: 1px solid var(--border); padding: 24px 0; background: var(--bg); }
+    .footer-inner { max-width: var(--max-w); margin: 0 auto; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; font-size: 0.82rem; color: var(--text-muted); }
+    .footer-left { display: flex; align-items: center; gap: 6px; }
+    .footer-links { display: flex; gap: 20px; }
+    .footer-links a { color: var(--text-muted); transition: color 0.2s; }
+    .footer-links a:hover { color: var(--text); text-decoration: none; }
+
+    /* ─── Responsive ─── */
+    @media (max-width: 768px) {
+      .nav-links a:not(.btn):not(.nav-link-rtk) { display: none; }
+      .hero { padding: 120px 20px 40px; }
+      .hero::before { width: 300px; height: 200px; }
+      .hero-stats { gap: 20px; } .stat-value { font-size: 1.5rem; }
+      .features-grid, .demo-grid, .install-grid, .prompts-grid, .pair-grid, .advanced-grid, .watch-grid, .discover-grid { grid-template-columns: 1fr; }
+      .slideshow-viewport { min-height: auto; }
+      .demo-card pre { font-size: 0.68rem; max-height: 280px; }
+      section { padding: 60px 0; }
+      .footer-inner { flex-direction: column; gap: 12px; text-align: center; }
+      .slideshow-nav { gap: 4px; } .slide-tab { padding: 4px 10px; font-size: 0.68rem; }
+      .terminal-body { font-size: 0.68rem; padding: 14px; min-height: 160px; }
+      .compare-table { min-width: 600px; }
+    }
+  </style>
+</head>
+<body>
+  <!-- Nav -->
+  <nav class="nav">
+    <div class="nav-inner">
+      <a href="#" class="nav-logo">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M4 4l5 4-5 4" stroke="#a78bfa" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M20 4l-5 4 5 4" stroke="#a78bfa" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 20h8" stroke="#a78bfa" stroke-width="2.5" stroke-linecap="round"/><path d="M14 2l-4 10" stroke="#e879f9" stroke-width="2" stroke-linecap="round" opacity="0.7"/></svg>
+        <span>itk</span>
+      </a>
+      <div class="nav-links">
+        <a href="#comparison">Savings</a>
+        <a href="#demo">Demo</a>
+        <a href="#watch">Watch</a>
+        <a href="#cleaned">Cleaners</a>
+        <a href="#prompts">Prompts</a>
+        <a href="#install">Install</a>
+        <a href="https://www.rtk-ai.app/" class="nav-link-rtk">RTK</a>
+        <a href="https://github.com/natekali/itk" class="btn btn-sm" target="_blank" rel="noopener">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+          GitHub
+        </a>
+      </div>
+    </div>
+  </nav>
+
+  <main>
+  <!-- Hero -->
+  <section class="hero">
+    <div class="hero-badges">
+      <span class="hero-badge badge-oss">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+        Open Source · MIT · Rust
+      </span>
+    </div>
+
+    <h1>Frame, compress,<br><span class="gradient-text">prompt-wrap.</span></h1>
+
+    <p class="hero-sub">
+      itk auto-detects what you're pasting and cleans it, <strong>frames it with context headers</strong>, and optionally wraps it in prompt templates. Your LLM gets better input — you save tokens and money.
+    </p>
+
+    <div class="features-grid reveal stagger-reveal" style="position: relative; margin-bottom: 40px;">
+      <div class="feature-card">
+        <div class="feature-icon frame">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18"/></svg>
+        </div>
+        <h4>Context Framing</h4>
+        <p>Adds <code>[type | lines | annotations]</code> headers so LLMs know what they're looking at</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon prompt">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#00e599" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        </div>
+        <h4>11 Prompt Templates</h4>
+        <p>Research-backed: fix, explain, refactor, review, debug, test, optimize, convert, document, migrate, security</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon watch">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fb923c" stroke-width="2" stroke-linecap="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        </div>
+        <h4>Watch Mode</h4>
+        <p>Auto-optimize clipboard in the background — zero friction for any LLM workflow</p>
+      </div>
+    </div>
+
+    <div class="hero-stats">
+      <div class="stat">
+        <span class="stat-value" data-count="true" data-target="80" data-prefix="10-" data-suffix="%">10-80%</span>
+        <span class="stat-label">savings by type</span>
+      </div>
+      <div class="stat-sep"></div>
+      <div class="stat">
+        <span class="stat-value">&lt;100ms</span>
+        <span class="stat-label">compression time</span>
+      </div>
+      <div class="stat-sep"></div>
+      <div class="stat">
+        <span class="stat-value" data-count="true" data-target="15">15</span>
+        <span class="stat-label">content types</span>
+      </div>
+      <div class="stat-sep"></div>
+      <div class="stat">
+        <span class="stat-value" data-count="true" data-target="11">11</span>
+        <span class="stat-label">prompt templates</span>
+      </div>
+    </div>
+
+    <div class="hero-cta">
+      <a href="#install" class="btn btn-primary">Install itk</a>
+      <a href="https://github.com/natekali/itk" class="btn btn-ghost" target="_blank" rel="noopener">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+        Star on GitHub
+      </a>
+    </div>
+
+    <!-- Terminal Demo: itk gain -->
+    <div class="terminal-demo" style="margin-top: 48px;">
+      <div class="terminal-header">
+        <div class="terminal-dot r"></div>
+        <div class="terminal-dot y"></div>
+        <div class="terminal-dot g"></div>
+        <span class="terminal-title">Terminal</span>
+      </div>
+      <div class="terminal-body">
+        <span class="prompt">$</span> <span class="cmd">itk gain</span>
+        <br><br>
+        <div class="terminal-box">
+          <span class="highlight">ITK — Token Savings</span>
+          <br><br>
+          <div class="terminal-row"><span class="label">Runs</span><span class="value">14 <span class="dim">·</span> 47 all time</span></div>
+          <div class="terminal-row"><span class="label">Tokens in</span><span class="value">23.1K <span class="dim">·</span> 87.4K all time</span></div>
+          <div class="terminal-row"><span class="label">Tokens out</span><span class="value">8.4K <span class="dim">·</span> 31.2K all time</span></div>
+          <div class="terminal-row"><span class="label">Tokens saved</span><span class="value accent">14.7K <span class="dim">·</span> 56.2K all time</span></div>
+          <div class="terminal-row"><span class="label">Avg savings</span><span class="value accent">63.6% <span class="dim">·</span> 64.3% all time</span></div>
+          <div class="terminal-row"><span class="label">Cost saved</span><span class="value"><span class="highlight-green">$0.07</span> <span class="dim">·</span> <span class="highlight-green">$0.28</span> all time</span></div>
+          <div class="terminal-divider"></div>
+          <span class="dim">By content type:</span><br>
+          <span class="highlight-cyan">trace/rust</span>     12 runs    <span class="highlight-green">71.2%</span><br>
+          <span class="highlight-cyan">git-diff</span>       10 runs    <span class="highlight-green">58.4%</span><br>
+          <span class="highlight-cyan">log</span>             9 runs    <span class="highlight-green">81.0%</span><br>
+          <span class="highlight-cyan">json</span>            8 runs    <span class="highlight-green">52.1%</span><br>
+          <span class="highlight-cyan">code/ts</span>          5 runs    <span class="highlight-green">41.3%</span>
+        </div>
+        <br>
+        <span class="prompt">$</span> <span class="cursor-blink"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Savings by Type -->
+  <section class="comparison" id="comparison">
+    <div class="section-inner">
+      <h2 class="reveal">Savings by content type</h2>
+      <p class="section-sub reveal">Actual compression varies — traces save most, clean YAML saves least.</p>
+      <div class="table-wrap reveal">
+        <table class="compare-table">
+          <thead><tr><th>What you paste</th><th>Default</th><th>--compact</th><th>--aggressive</th></tr></thead>
+          <tbody>
+            <tr><td>Python stack trace</td><td>~600 tokens</td><td>—</td><td class="savings-high">-75%</td></tr>
+            <tr><td>Git diff (3 files)</td><td>~800 tokens</td><td>—</td><td class="savings-high">-55%</td></tr>
+            <tr><td>Log file (1K lines)</td><td>~1.6K tokens</td><td>—</td><td class="savings-high">-80%</td></tr>
+            <tr><td>CSV (10K rows)</td><td>~1.2K tokens</td><td>—</td><td class="savings-high">-98%</td></tr>
+            <tr><td>HTML page</td><td>~4K tokens</td><td>—</td><td class="savings-high">-67%</td></tr>
+            <tr><td>JSON API error</td><td>~2.1K tokens</td><td class="savings-mid">-37%</td><td class="savings-high">-50%</td></tr>
+            <tr><td>Markdown README</td><td>~1.4K tokens</td><td>—</td><td class="savings-mid">-43%</td></tr>
+            <tr><td>.env file</td><td>~450 tokens</td><td>—</td><td class="savings-mid">-10%</td></tr>
+            <tr><td>TypeScript file</td><td>~4.3K tokens</td><td>—</td><td class="savings-mid">-11%</td></tr>
+            <tr><td>Kubernetes YAML</td><td>~5.2K tokens</td><td>—</td><td class="savings-low">0%*</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="text-align: center; color: var(--text-dim); margin-top: 16px; font-size: 0.8rem;">* Even at 0% compression, framing gives LLMs instant context about content type.</p>
+    </div>
+  </section>
+
+  <!-- Demo Slideshow -->
+  <section class="demo-section" id="demo">
+    <div class="section-inner">
+      <h2 class="reveal">See the difference</h2>
+      <p class="section-sub reveal">Framing + compression. Before and after.</p>
+      <div class="slideshow reveal">
+        <div class="slideshow-nav">
+          <button class="slide-tab active" data-slide="0">Stack trace</button>
+          <button class="slide-tab" data-slide="1">Git diff</button>
+          <button class="slide-tab" data-slide="2">Log file</button>
+          <button class="slide-tab" data-slide="3">JSON</button>
+        </div>
+        <div class="slideshow-viewport">
+          <div class="slide active" data-index="0">
+            <div class="demo-grid">
+              <div class="demo-card"><div class="demo-card-header"><span class="demo-dot red"></span><span class="demo-label">Raw paste</span><span class="demo-tokens">~140 tokens</span></div>
+<pre><code>Traceback (most recent call last):
+  File "/app/main.py", line 234, in handle_request
+    result = process_order(request.data)
+  File "/app/services/orders.py", line 89, in process_order
+    user = get_user(order["user_id"])
+  File "/app/services/users.py", line 45, in get_user
+    return db.session.query(User).filter_by(id=user_id).one()
+  File "/venv/lib/sqlalchemy/orm/query.py", line 3423, in one
+    raise NoResultFound("No row was found")
+  File "/venv/lib/sqlalchemy/engine/result.py", line 560, in one_or_none
+    return self._only_one_row(True, True, False)
+  File "/venv/lib/sqlalchemy/engine/result.py", line 498, in _only_one_row
+    raise NoResultFound("No row was found when one was required")
+sqlalchemy.exc.NoResultFound: No row was found when one was required</code></pre></div>
+              <div class="demo-card demo-after"><div class="demo-card-header"><span class="demo-dot green"></span><span class="demo-label">itk --aggressive</span><span class="demo-tokens">~107 tokens</span><span class="demo-savings">-23%</span></div>
+<pre><code><span class="highlight">[trace/python | 13 lines | 5 frames
+ | sqlalchemy.exc.NoResultFound: No row was found]</span>
+Traceback (most recent call last):
+  File "/app/main.py", line 234, in handle_request
+    result = process_order(request.data)
+  File "/app/services/orders.py", line 89, in process_order
+    user = get_user(order["user_id"])
+  File "/app/services/users.py", line 45, in get_user
+    return db.session.query(User).filter_by(id=user_id).one()
+  File "/venv/lib/sqlalchemy/orm/query.py", line 3423, in one
+    raise NoResultFound("No row was found")
+  ... <span class="truncated">[frames truncated by itk]</span>
+sqlalchemy.exc.NoResultFound: No row was found when one was required</code></pre></div>
+            </div>
+          </div>
+          <div class="slide" data-index="1">
+            <div class="demo-grid">
+              <div class="demo-card"><div class="demo-card-header"><span class="demo-dot red"></span><span class="demo-label">Raw git diff</span><span class="demo-tokens">~180 tokens</span></div>
+<pre><code>diff --git a/src/main.rs b/src/main.rs
+index abc1234..def5678 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -10,6 +10,8 @@ fn main() {
+     let config = Config::load();
+     let db = Database::connect(&config.db_url);
+     let server = Server::new(config.port);
++    let auth = AuthMiddleware::new(&config.jwt_secret);
++    server.use_middleware(auth);
+     server.start();
+ }</code></pre></div>
+              <div class="demo-card demo-after"><div class="demo-card-header"><span class="demo-dot green"></span><span class="demo-label">itk --diff</span><span class="demo-tokens">~120 tokens</span><span class="demo-savings">-33%</span></div>
+<pre><code><span class="highlight">[git-diff | 12 lines | 1 file(s) | +2/-0]</span>
+diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -10,6 +10,8 @@ fn main() {
+     let config = Config::load();
+     let db = Database::connect(&config.db_url);
+     let server = Server::new(config.port);
++    let auth = AuthMiddleware::new(&config.jwt_secret);
++    server.use_middleware(auth);
+     server.start();</code></pre></div>
+            </div>
+          </div>
+          <div class="slide" data-index="2">
+            <div class="demo-grid">
+              <div class="demo-card"><div class="demo-card-header"><span class="demo-dot red"></span><span class="demo-label">Raw log</span><span class="demo-tokens">~200 tokens</span></div>
+<pre><code>2024-01-15 10:30:11 ERROR Connection refused to database replica-2 at 10.0.1.5:5432
+2024-01-15 10:30:11 ERROR Connection refused to database replica-2 at 10.0.1.5:5432
+2024-01-15 10:30:11 ERROR Connection refused to database replica-2 at 10.0.1.5:5432
+2024-01-15 10:30:12 WARN  Failover to replica-3 initiated
+2024-01-15 10:30:12 INFO  Health check passed for replica-3
+2024-01-15 10:30:13 INFO  Connection established to replica-3
+2024-01-15 10:30:15 WARN  Memory usage at 78% threshold
+2024-01-15 10:30:20 ERROR Out of memory in worker thread
+2024-01-15 10:30:21 INFO  Restarting worker thread...</code></pre></div>
+              <div class="demo-card demo-after"><div class="demo-card-header"><span class="demo-dot green"></span><span class="demo-label">itk --aggressive</span><span class="demo-tokens">~60 tokens</span><span class="demo-savings">-70%</span></div>
+<pre><code><span class="highlight">[log | 7 lines | 3 error(s) | 2 warning(s)]</span>
+2024-01-15 10:30:11 ERROR Connection refused to database replica-2
+  <span class="truncated">[... 2 identical lines suppressed]</span>
+2024-01-15 10:30:12 WARN  Failover to replica-3 initiated
+2024-01-15 10:30:15 WARN  Memory usage at 78% threshold
+2024-01-15 10:30:20 ERROR Out of memory in worker thread
+2024-01-15 10:30:21 INFO  Restarting worker thread...</code></pre></div>
+            </div>
+          </div>
+          <div class="slide" data-index="3">
+            <div class="demo-grid">
+              <div class="demo-card"><div class="demo-card-header"><span class="demo-dot red"></span><span class="demo-label">Raw JSON</span><span class="demo-tokens">~320 tokens</span></div>
+<pre><code>{
+  "errors": [
+    {
+      "message": "Validation failed",
+      "code": "VALIDATION_ERROR",
+      "details": {
+        "field": "email",
+        "constraint": "format",
+        "value": "invalid-email",
+        "expected": "valid email address"
+      },
+      "timestamp": "2024-01-15T10:30:00Z",
+      "request_id": "req-abc123"
+    }
+  ],
+  "status": 422,
+  "meta": {
+    "version": "1.0",
+    "service": "user-service",
+    "documentation_url": "https://api.example.com/docs/errors"
+  }
+}</code></pre></div>
+              <div class="demo-card demo-after"><div class="demo-card-header"><span class="demo-dot green"></span><span class="demo-label">itk --compact</span><span class="demo-tokens">~180 tokens</span><span class="demo-savings">-44%</span></div>
+<pre><code><span class="highlight">[json | 8 lines | 3 top-level keys | error response]</span>
+{
+  "errors": [
+    {
+      "message": "Validation failed",
+      "code": "VALIDATION_ERROR",
+      "details": {
+        "field": "email",
+        "constraint": "format",
+        "value": "invalid-email"
+      }
+    }
+  ],
+  "status": 422
+}
+
+<span class="truncated">// Stripped: timestamp, request_id, meta</span></code></pre></div>
+            </div>
+          </div>
+        </div>
+        <div class="slideshow-controls">
+          <button class="slide-arrow slide-prev" aria-label="Previous"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg></button>
+          <div class="slide-dots">
+            <span class="dot active" data-slide="0"></span>
+            <span class="dot" data-slide="1"></span>
+            <span class="dot" data-slide="2"></span>
+            <span class="dot" data-slide="3"></span>
+          </div>
+          <button class="slide-arrow slide-next" aria-label="Next"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Watch Mode -->
+  <section class="watch-section" id="watch">
+    <div class="section-inner">
+      <h2 class="reveal">Clipboard watcher</h2>
+      <p class="section-sub reveal">Start it, forget it. Your clipboard is auto-optimized.</p>
+      <div class="watch-grid reveal">
+        <div class="watch-features">
+          <div class="watch-feature">
+            <div class="watch-feature-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></div>
+            <div><h4>Zero friction</h4><p>Run <code>itk watch</code> once and keep coding. Every clipboard copy is auto-checked.</p></div>
+          </div>
+          <div class="watch-feature">
+            <div class="watch-feature-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div>
+            <div><h4>250ms polling</h4><p>Negligible CPU. Detects clipboard changes instantly and skips plain text.</p></div>
+          </div>
+          <div class="watch-feature">
+            <div class="watch-feature-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg></div>
+            <div><h4>Instant undo</h4><p>Changed your mind? <code>itk undo</code> restores your clipboard before the last modification.</p></div>
+          </div>
+          <div class="watch-feature">
+            <div class="watch-feature-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></div>
+            <div><h4>Session summary</h4><p>Ctrl+C shows total runs and tokens saved during the watch session.</p></div>
+          </div>
+        </div>
+        <div class="terminal-demo">
+          <div class="terminal-header">
+            <div class="terminal-dot r"></div><div class="terminal-dot y"></div><div class="terminal-dot g"></div>
+            <span class="terminal-title">itk watch</span>
+          </div>
+          <div class="terminal-body">
+            <span class="prompt">$</span> <span class="cmd">itk watch</span><br><br>
+            <span class="dim">itk:</span> <strong style="color:var(--text-bright)">watching clipboard...</strong> press <span class="highlight-cyan">Ctrl+C</span> to stop<br><br>
+            <span class="dim">&nbsp;&nbsp;itk:</span> <span class="highlight-cyan">[trace/python]</span> 2400 -> 600 tokens (<span class="highlight-green">-75%</span>) <span class="highlight-green">v</span><br>
+            <span class="dim">&nbsp;&nbsp;itk:</span> <span class="highlight-cyan">[json]</span> 1200 -> 800 tokens (<span class="highlight-green">-33%</span>) <span class="highlight-green">v</span><br>
+            <span class="dim">&nbsp;&nbsp;itk:</span> <span class="highlight-cyan">[text]</span> <span class="dim">skipped (plain text)</span><br>
+            <span class="dim">&nbsp;&nbsp;itk:</span> <span class="highlight-cyan">[log]</span> 8000 -> 1600 tokens (<span class="highlight-green">-80%</span>) <span class="highlight-green">v</span><br>
+            <span class="dim">&nbsp;&nbsp;itk:</span> <span class="highlight-cyan">[yaml]</span> <span class="dim">no savings, clipboard unchanged</span><br><br>
+            <span class="dim">^C</span><br>
+            <span class="dim">itk:</span> <strong style="color:var(--text-bright)">session summary:</strong> 3 runs, ~<span class="highlight-green">9200</span> tokens saved<br><br>
+            <span class="prompt">$</span> <span class="cursor-blink"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- What Gets Cleaned -->
+  <section class="cleaned" id="cleaned">
+    <div class="section-inner">
+      <h2 class="reveal">What gets cleaned</h2>
+      <p class="section-sub reveal">Auto-detection scans the first 8 KB — zero config needed.</p>
+      <div class="table-wrap reveal">
+        <table class="cleaned-table">
+          <thead><tr><th>Content</th><th>What ITK does</th></tr></thead>
+          <tbody>
+            <tr><td>Stack traces <code>(py/js/rs/go/java)</code></td><td>Extract root cause, collapse internal frames, truncate with <code>[... N frames truncated]</code></td></tr>
+            <tr><td>Git diff / patch</td><td>Drop context lines beyond 2, keep all +/- lines, emit omission markers</td></tr>
+            <tr><td>Log files</td><td>Strip ANSI, timestamps; deduplicate identical lines, remove progress bars</td></tr>
+            <tr><td>JSON</td><td>Pretty-print, summarise arrays, extract errors, truncate long strings (<code>--compact</code>)</td></tr>
+            <tr><td>YAML <code>(K8s, Compose, Actions)</code></td><td>Strip comments, collapse blanks; <code>--aggressive</code>: remove defaults</td></tr>
+            <tr><td>Code <code>(ts/js/rs/py/go/java)</code></td><td>Collapse imports, strip doc comments, wrap in fenced block</td></tr>
+            <tr><td>Build output <code>(cargo/tsc/eslint)</code></td><td>Group errors by file, deduplicate</td></tr>
+            <tr><td>Markdown</td><td>Collapse blanks; <code>--aggressive</code>: remove badges, install/license sections</td></tr>
+            <tr><td>HTML / XML</td><td>Strip comments, remove script/style blocks; extract text content</td></tr>
+            <tr><td>SQL</td><td>Remove comments, normalize whitespace; <code>--compact</code>: uppercase keywords</td></tr>
+            <tr><td>CSV</td><td>Header + first 5 data rows + summary; <code>--aggressive</code>: 3 rows only</td></tr>
+            <tr><td>Dockerfile</td><td>Collapse blanks; <code>--aggressive</code>: strip comments, merge multi-line RUN</td></tr>
+            <tr><td>.env files</td><td>Mask secret values (<code>API_KEY=***</code>); 30+ secret patterns detected</td></tr>
+            <tr><td>Terraform / HCL</td><td>Strip comments; <code>--aggressive</code>: remove defaults, collapse blocks</td></tr>
+            <tr><td>Plain text</td><td>Strip ANSI, trim whitespace; <code>--aggressive</code>: deduplicate lines</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- Prompt Templates -->
+  <section class="prompts" id="prompts">
+    <div class="section-inner">
+      <h2 class="reveal">Prompt templates</h2>
+      <p class="section-sub reveal">Content-type-aware prompts with role prompting and structured output formats.</p>
+      <div class="prompts-grid reveal stagger-reveal">
+        <div class="prompt-card"><code>--prompt fix</code><p>Identify root cause, provide minimal fix</p></div>
+        <div class="prompt-card"><code>--prompt explain</code><p>Explain what this code does / caused the error</p></div>
+        <div class="prompt-card"><code>--prompt refactor</code><p>Refactor for readability & maintainability</p></div>
+        <div class="prompt-card"><code>--prompt review</code><p>Review for bugs, security, anti-patterns</p></div>
+        <div class="prompt-card"><code>--prompt debug</code><p>Help debug — identify most likely cause</p></div>
+        <div class="prompt-card"><code>--prompt test</code><p>Write unit tests for this code</p></div>
+        <div class="prompt-card"><code>--prompt optimize</code><p>Identify bottlenecks, suggest optimizations</p></div>
+        <div class="prompt-card"><code>--prompt convert</code><p>Convert to appropriate equivalent format</p></div>
+        <div class="prompt-card"><code>--prompt document</code><p>Generate documentation for all public items</p></div>
+        <div class="prompt-card"><code>--prompt migrate</code><p>Migrate to target framework/language</p></div>
+        <div class="prompt-card"><code>--prompt security</code><p>Audit for security vulnerabilities</p></div>
+      </div>
+      <p style="text-align: center; color: var(--text-muted); margin-top: 24px; font-size: 0.88rem;">
+        Use <code style="background: var(--bg); padding: 2px 8px; border-radius: 4px; color: var(--accent);">--focus "the auth middleware"</code> to direct LLM attention.
+      </p>
+    </div>
+  </section>
+
+  <!-- Discover & Gain -->
+  <section class="discover-section" id="discover">
+    <div class="section-inner">
+      <h2 class="reveal">Track your savings</h2>
+      <p class="section-sub reveal">Dashboard + missed savings discovery across Claude Code sessions.</p>
+      <div class="discover-grid reveal">
+        <div class="terminal-demo">
+          <div class="terminal-header"><div class="terminal-dot r"></div><div class="terminal-dot y"></div><div class="terminal-dot g"></div><span class="terminal-title">itk discover --all</span></div>
+          <div class="terminal-body" style="min-height: 180px;">
+            <span class="prompt">$</span> <span class="cmd">itk discover --all</span><br><br>
+            <span class="highlight">ITK Discover — Missed Savings</span><br>
+            <span class="dim">════════════════════════════════════</span><br>
+            <span class="dim">Scanned: 89 sessions (30 days)</span><br><br>
+            <span class="highlight-cyan">Stack traces</span>&nbsp;&nbsp;&nbsp;&nbsp;23&nbsp;&nbsp;~18.4K&nbsp;&nbsp;<span class="highlight-green">-75%</span><br>
+            <span class="highlight-cyan">JSON payloads</span>&nbsp;&nbsp;&nbsp;31&nbsp;&nbsp;~42.1K&nbsp;&nbsp;<span class="highlight-green">-37%</span><br>
+            <span class="highlight-cyan">Log files</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;8&nbsp;&nbsp;~12.0K&nbsp;&nbsp;<span class="highlight-green">-80%</span><br>
+            <span class="highlight-cyan">Code files</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;19&nbsp;&nbsp;~28.5K&nbsp;&nbsp;<span class="highlight-green">-11%</span><br>
+            <span class="highlight-cyan">Git diffs</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;12&nbsp;&nbsp;&nbsp;~8.4K&nbsp;&nbsp;<span class="highlight-green">-55%</span><br>
+            <span class="dim">────────────────────────────────────</span><br>
+            <strong style="color:var(--text-bright)">Total: 93 msgs → ~46.7K saveable</strong>
+          </div>
+        </div>
+        <div class="terminal-demo">
+          <div class="terminal-header"><div class="terminal-dot r"></div><div class="terminal-dot y"></div><div class="terminal-dot g"></div><span class="terminal-title">itk gain --daily</span></div>
+          <div class="terminal-body" style="min-height: 180px;">
+            <span class="prompt">$</span> <span class="cmd">itk gain --daily</span><br><br>
+            <span class="highlight">ITK — Daily Breakdown</span><br>
+            <span class="dim">════════════════════════════════════</span><br>
+            <span class="dim">Date</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="dim">Runs</span>&nbsp;&nbsp;<span class="dim">Saved</span>&nbsp;&nbsp;&nbsp;&nbsp;<span class="dim">Avg</span><br>
+            <span class="dim">────────────────────────────────────</span><br>
+            Feb 27&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;14&nbsp;&nbsp;&nbsp;&nbsp;14.7K&nbsp;&nbsp;&nbsp;&nbsp;<span class="highlight-green">63.6%</span><br>
+            Feb 26&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;11&nbsp;&nbsp;&nbsp;&nbsp;12.3K&nbsp;&nbsp;&nbsp;&nbsp;<span class="highlight-green">58.2%</span><br>
+            Feb 25&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;8&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;9.1K&nbsp;&nbsp;&nbsp;&nbsp;<span class="highlight-green">71.4%</span><br>
+            Feb 24&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;14&nbsp;&nbsp;&nbsp;&nbsp;20.1K&nbsp;&nbsp;&nbsp;&nbsp;<span class="highlight-green">65.8%</span><br>
+            <span class="dim">────────────────────────────────────</span><br>
+            <strong style="color:var(--text-bright)">TOTAL</strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;47&nbsp;&nbsp;&nbsp;&nbsp;<span class="highlight-green">56.2K</span>&nbsp;&nbsp;&nbsp;&nbsp;<span class="highlight-green">64.3%</span>
+          </div>
+        </div>
+      </div>
+      <p style="text-align: center; color: var(--text-muted); margin-top: 24px; font-size: 0.88rem;">
+        Export with <code style="background: var(--bg); padding: 2px 8px; border-radius: 4px; color: var(--accent);">--format json</code> or <code style="background: var(--bg); padding: 2px 8px; border-radius: 4px; color: var(--accent);">--format csv</code>
+      </p>
+    </div>
+  </section>
+
+  <!-- Pair Section -->
+  <section class="pair">
+    <div class="section-inner">
+      <h2 class="reveal" style="text-align: center; margin-bottom: 8px;"><span style="color: var(--green);">RTK</span> for output. <span style="color: var(--accent);">ITK</span> for input.</h2>
+      <p class="section-sub reveal">The ultimate LLM dev pair.</p>
+      <div class="pair-grid reveal">
+        <div class="pair-card rtk">
+          <h3>rtk</h3>
+          <p>Proxy wrapping CLI commands</p>
+          <div class="examples">Automatic via hook</div>
+        </div>
+        <div class="pair-card itk">
+          <h3>itk</h3>
+          <p>Clipboard/pipe/file processor</p>
+          <div class="examples">itk watch · itk init · manual</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Install -->
+  <section class="install-section" id="install">
+    <div class="section-inner">
+      <h2 class="reveal">Get started in 10 seconds</h2>
+      <p class="section-sub reveal">Install, copy content, run itk. That's it.</p>
+      <div class="install-grid reveal stagger-reveal">
+        <div class="install-card install-primary">
+          <h3>Linux / macOS</h3>
+          <p>One-liner</p>
+          <div class="code-block">
+            <code>curl -fsSL https://raw.githubusercontent.com/natekali/itk/main/install.sh | sh</code>
+            <button class="copy-btn" data-copy="curl -fsSL https://raw.githubusercontent.com/natekali/itk/main/install.sh | sh" aria-label="Copy"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
+          </div>
+        </div>
+        <div class="install-card">
+          <h3>Windows</h3>
+          <p>PowerShell</p>
+          <div class="code-block">
+            <code>irm https://raw.githubusercontent.com/natekali/itk/main/install.ps1 | iex</code>
+            <button class="copy-btn" data-copy="irm https://raw.githubusercontent.com/natekali/itk/main/install.ps1 | iex" aria-label="Copy"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
+          </div>
+        </div>
+        <div class="install-card">
+          <h3>From source</h3>
+          <p>Cargo</p>
+          <div class="code-block">
+            <code>cargo install --path .</code>
+            <button class="copy-btn" data-copy="cargo install --path ." aria-label="Copy"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
+          </div>
+        </div>
+      </div>
+      <p style="text-align: center; color: var(--text-muted); margin-top: 24px; font-size: 0.88rem;">
+        Update anytime with <code style="background: var(--bg-card); padding: 2px 8px; border-radius: 4px; color: var(--accent);">itk update</code>
+      </p>
+    </div>
+  </section>
+
+  <!-- Advanced -->
+  <section class="advanced-section">
+    <div class="section-inner">
+      <h2 class="reveal">And more</h2>
+      <p class="section-sub reveal">Every detail covered for a polished developer experience.</p>
+      <div class="advanced-grid reveal stagger-reveal">
+        <div class="adv-card">
+          <div class="adv-icon" style="background: var(--accent-dim);"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></div>
+          <h4>Config file</h4>
+          <p>Per-project or global defaults via <code>.itk.json</code></p>
+        </div>
+        <div class="adv-card">
+          <div class="adv-icon" style="background: var(--cyan-dim);"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></div>
+          <h4>Shell completions</h4>
+          <p>Tab completion for bash, zsh, fish, powershell</p>
+        </div>
+        <div class="adv-card">
+          <div class="adv-icon" style="background: var(--green-dim);"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#00e599" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></div>
+          <h4>Colored output</h4>
+          <p>Respects <code>NO_COLOR</code> and TTY detection</p>
+        </div>
+        <div class="adv-card">
+          <div class="adv-icon" style="background: var(--orange-dim);"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fb923c" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
+          <h4>Secret masking</h4>
+          <p>.env files: 30+ patterns masked automatically</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="cta-section">
+    <div class="section-inner">
+      <h2 class="reveal">Your LLM gets better input.</h2>
+      <p class="section-sub reveal">Frame, compress, prompt-wrap. Install itk.</p>
+      <div class="hero-cta reveal">
+        <a href="#install" class="btn btn-primary">Install itk</a>
+        <a href="https://github.com/natekali/itk" class="btn btn-ghost" target="_blank" rel="noopener">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+          Star on GitHub
+        </a>
+      </div>
+    </div>
+  </section>
+
+  </main>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="footer-inner">
+      <div class="footer-left">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M4 4l5 4-5 4" stroke="#a78bfa" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M20 4l-5 4 5 4" stroke="#a78bfa" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 20h8" stroke="#a78bfa" stroke-width="2.5" stroke-linecap="round"/><path d="M14 2l-4 10" stroke="#e879f9" stroke-width="2" stroke-linecap="round" opacity="0.7"/></svg>
+        <strong>itk</strong> · Input Token Killer
+      </div>
+      <div class="footer-links">
+        <a href="https://www.rtk-ai.app/" target="_blank" rel="noopener">RTK</a>
+        <a href="https://github.com/natekali/itk" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://raw.githubusercontent.com/natekali/itk/refs/heads/main/LICENSE.txt" target="_blank" rel="noopener">MIT License</a>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // Scroll Reveal + Stagger
+    const revealObserver = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('visible');
+          // Stagger children if applicable
+          if (entry.target.classList.contains('stagger-reveal')) {
+            Array.from(entry.target.children).forEach((child, i) => {
+              child.style.transitionDelay = `${i * 80}ms`;
+            });
+            // Re-trigger by re-adding visible class after delays are set
+            entry.target.classList.remove('visible');
+            requestAnimationFrame(() => entry.target.classList.add('visible'));
+          }
+          revealObserver.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+
+    document.querySelectorAll('.reveal').forEach(el => revealObserver.observe(el));
+
+    // Counter Animation
+    const counterObserver = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          const el = entry.target;
+          const target = parseInt(el.dataset.target);
+          const prefix = el.dataset.prefix || '';
+          const suffix = el.dataset.suffix || '';
+          let current = 0;
+          const step = Math.max(1, Math.ceil(target / 30));
+          const interval = setInterval(() => {
+            current += step;
+            if (current >= target) { el.textContent = prefix + target + suffix; clearInterval(interval); }
+            else { el.textContent = prefix + current + suffix; }
+          }, 30);
+          counterObserver.unobserve(el);
+        }
+      });
+    }, { threshold: 0.5 });
+
+    document.querySelectorAll('[data-count="true"]').forEach(el => counterObserver.observe(el));
+
+    // Copy Buttons
+    document.querySelectorAll('.copy-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        navigator.clipboard.writeText(btn.dataset.copy).then(() => {
+          btn.classList.add('copied');
+          setTimeout(() => btn.classList.remove('copied'), 1500);
+        });
+      });
+    });
+
+    // Slideshow
+    const slides = document.querySelectorAll('.slide');
+    const tabs = document.querySelectorAll('.slide-tab');
+    const dots = document.querySelectorAll('.dot');
+    let current = 0;
+    let autoTimer;
+
+    function goTo(idx) {
+      slides[current].classList.remove('active');
+      tabs[current].classList.remove('active');
+      dots[current].classList.remove('active');
+      current = idx;
+      slides[current].classList.add('active');
+      tabs[current].classList.add('active');
+      dots[current].classList.add('active');
+      resetAuto();
+    }
+    function next() { goTo((current + 1) % slides.length); }
+    function prev() { goTo((current - 1 + slides.length) % slides.length); }
+    function resetAuto() { clearInterval(autoTimer); autoTimer = setInterval(next, 7000); }
+
+    tabs.forEach(t => t.addEventListener('click', () => goTo(+t.dataset.slide)));
+    dots.forEach(d => d.addEventListener('click', () => goTo(+d.dataset.slide)));
+    document.querySelector('.slide-next').addEventListener('click', next);
+    document.querySelector('.slide-prev').addEventListener('click', prev);
+    document.addEventListener('keydown', e => { if (e.key === 'ArrowRight') next(); if (e.key === 'ArrowLeft') prev(); });
+    resetAuto();
+
+    // Smooth nav
+    document.querySelectorAll('.nav-links a[href^="#"]').forEach(link => {
+      link.addEventListener('click', (e) => {
+        const target = document.querySelector(link.getAttribute('href'));
+        if (target) { e.preventDefault(); target.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      });
+    });
+  </script>
+</body>
+</html>
