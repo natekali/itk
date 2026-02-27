@@ -1,3 +1,0 @@
-(function() {var implementors = {
-"strip_ansi_escapes":[["impl&lt;W&gt; !<a class=\"trait\" href=\"https://doc.rust-lang.org/1.81.0/core/panic/unwind_safe/trait.UnwindSafe.html\" title=\"trait core::panic::unwind_safe::UnwindSafe\">UnwindSafe</a> for <a class=\"struct\" href=\"strip_ansi_escapes/struct.Writer.html\" title=\"struct strip_ansi_escapes::Writer\">Writer</a>&lt;W&gt;",1,["strip_ansi_escapes::Writer"]]]
-};if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()

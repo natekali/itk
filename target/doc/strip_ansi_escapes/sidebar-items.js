@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["strip","strip_str"],"struct":["Writer"]};
