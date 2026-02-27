@@ -1,7 +1,7 @@
 use regex::Regex;
 
 /// Clean SQL: normalize whitespace, uppercase keywords, remove comments.
-pub fn clean_sql(s: &str, aggressive: bool) -> String {
+pub fn clean_sql(s: &str, _aggressive: bool) -> String {
     let mut out = Vec::new();
     let mut blank_run = 0usize;
 
@@ -18,11 +18,8 @@ pub fn clean_sql(s: &str, aggressive: bool) -> String {
         }
         blank_run = 0;
 
-        // Skip SQL comments
+        // Always strip SQL comments — they waste tokens for LLMs
         if trimmed.starts_with("--") {
-            if !aggressive {
-                out.push(trimmed.to_string());
-            }
             continue;
         }
 
@@ -36,13 +33,9 @@ pub fn clean_sql(s: &str, aggressive: bool) -> String {
         out.push(line);
     }
 
-    // In aggressive mode, also collapse multi-line INSERT VALUES into summary
+    // Always collapse multi-line INSERT VALUES into summary (safe — LLMs don't need 100s of rows)
     let result = out.join("\n");
-    if aggressive {
-        collapse_insert_values(&result)
-    } else {
-        result
-    }
+    collapse_insert_values(&result)
 }
 
 fn uppercase_sql_keywords(line: &str) -> String {
@@ -104,7 +97,7 @@ fn collapse_insert_values(s: &str) -> String {
                 if values_count <= 3 {
                     out.push(lines[i].to_string());
                 } else if values_count == 4 {
-                    out.push(format!("  -- ... [VALUES rows truncated by itk]"));
+                    out.push("  -- ... [VALUES rows truncated by itk]".to_string());
                 }
                 // Check if this is the last values row (ends with ; or no trailing comma)
                 if trimmed.ends_with(';') || (!trimmed.ends_with(',') && !trimmed.ends_with("),(")) {

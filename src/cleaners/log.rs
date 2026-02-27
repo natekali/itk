@@ -17,7 +17,17 @@ fn re_hex_addr() -> &'static Regex {
 
 fn re_long_num() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r"\b\d{6,}\b").unwrap())
+    R.get_or_init(|| Regex::new(r"\b\d{4,}\b").unwrap())
+}
+
+fn re_ip_addr() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| Regex::new(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d+)?\b").unwrap())
+}
+
+fn re_uuid() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| Regex::new(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b").unwrap())
 }
 
 fn re_progress_bar() -> &'static Regex {
@@ -28,7 +38,7 @@ fn re_progress_bar() -> &'static Regex {
 }
 
 pub fn clean_log(s: &str, aggressive: bool) -> String {
-    let max_repeated: usize = if aggressive { 1 } else { 3 };
+    let max_repeated: usize = if aggressive { 1 } else { 2 };
     let mut out: Vec<String> = Vec::new();
     let mut last_normalized = String::new();
     let mut repeat_count = 0usize;
@@ -69,6 +79,8 @@ pub fn clean_log(s: &str, aggressive: bool) -> String {
 
 fn normalize_log_line(line: &str) -> String {
     let mut s = re_timestamp().replace_all(line, "TS").into_owned();
+    s = re_uuid().replace_all(&s, "UUID").into_owned();
+    s = re_ip_addr().replace_all(&s, "IP").into_owned();
     s = re_hex_addr().replace_all(&s, "ADDR").into_owned();
     s = re_long_num().replace_all(&s, "NUM").into_owned();
     s

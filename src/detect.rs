@@ -331,7 +331,7 @@ fn parse_forced_type(t: &str) -> ContentType {
         "ts" | "typescript" => ContentType::Code("typescript".to_string()),
         "go" => ContentType::Code("go".to_string()),
         "java" => ContentType::Code("java".to_string()),
-        "trace" | "stack" => ContentType::StackTrace(StackTraceLang::Unknown),
+        "trace" | "stack" => ContentType::StackTrace(StackTraceLang::JavaScript),
         "build" | "cargo" => ContentType::BuildOutput(BuildTool::Cargo),
         "tsc" => ContentType::BuildOutput(BuildTool::TypeScript),
         "eslint" | "lint" => ContentType::BuildOutput(BuildTool::Eslint),

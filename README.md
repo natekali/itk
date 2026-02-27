@@ -1,6 +1,6 @@
 # itk — Input Token Killer
 
-[![Version](https://img.shields.io/badge/version-0.5.0-a78bfa.svg)](https://github.com/natekali/itk/releases)
+[![Version](https://img.shields.io/badge/version-0.6.0-a78bfa.svg)](https://github.com/natekali/itk/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-blue.svg)](https://github.com/natekali/itk/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
@@ -126,7 +126,7 @@ itk update
 
 ### Verify
 ```bash
-itk --version    # Should show "itk 0.5.0"
+itk --version    # Should show "itk 0.6.0"
 ```
 
 ## Quick Start

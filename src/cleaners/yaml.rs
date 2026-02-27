@@ -100,6 +100,27 @@ pub fn clean_yaml(s: &str, aggressive: bool) -> String {
         }
         blank_run = 0;
 
+        // Strip inline comments (# after content, outside quotes)
+        let trimmed = strip_yaml_inline_comment(trimmed);
+        let trimmed = trimmed.as_str();
+
+        // Always strip documentation keys (description, title, example) — noise for LLMs
+        let is_doc_key = YAML_DOC_KEYS.iter().any(|dk| {
+            trimmed == *dk
+                || trimmed.starts_with(&format!("{dk}:"))
+                || trimmed.starts_with(&format!("{dk} :"))
+        });
+        if is_doc_key {
+            let after_colon = trimmed.split_once(':').map(|x| x.1)
+                .map(|s| s.trim())
+                .unwrap_or("");
+            if after_colon == "|" || after_colon == ">" || after_colon.is_empty() {
+                skip_block = true;
+                block_indent = indent;
+            }
+            continue;
+        }
+
         // Aggressive-mode filters
         if aggressive {
             // Skip status sections in Kubernetes resource dumps
@@ -107,25 +128,6 @@ pub fn clean_yaml(s: &str, aggressive: bool) -> String {
                 skip_status = true;
                 status_indent = indent;
                 out.push("status: # [omitted by itk]".to_string());
-                continue;
-            }
-
-            // Skip documentation keys (description, title, example, etc.)
-            let is_doc_key = YAML_DOC_KEYS.iter().any(|dk| {
-                trimmed == *dk
-                    || trimmed.starts_with(&format!("{dk}:"))
-                    || trimmed.starts_with(&format!("{dk} :"))
-            });
-            if is_doc_key {
-                let after_colon = trimmed
-                    .splitn(2, ':')
-                    .nth(1)
-                    .map(|s| s.trim())
-                    .unwrap_or("");
-                if after_colon == "|" || after_colon == ">" || after_colon.is_empty() {
-                    skip_block = true;
-                    block_indent = indent;
-                }
                 continue;
             }
 
@@ -143,7 +145,7 @@ pub fn clean_yaml(s: &str, aggressive: bool) -> String {
         }
 
         // Detect block scalar start and set up truncation
-        let after_colon = trimmed.splitn(2, ':').nth(1).map(|s| s.trim()).unwrap_or("");
+        let after_colon = trimmed.split_once(':').map(|x| x.1).map(|s| s.trim()).unwrap_or("");
         if after_colon == "|" || after_colon == ">" || after_colon == "|+" || after_colon == ">-" {
             in_block_scalar = true;
             block_scalar_indent = indent;
@@ -165,4 +167,32 @@ pub fn clean_yaml(s: &str, aggressive: bool) -> String {
     }
 
     out.join("\n")
+}
+
+/// Strip inline YAML comments (# after content, outside quoted strings).
+fn strip_yaml_inline_comment(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut in_string = false;
+    let mut string_char = b'"';
+    let mut i = 0;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            if b == b'\\' {
+                i += 2;
+                continue;
+            }
+            if b == string_char {
+                in_string = false;
+            }
+        } else if b == b'"' || b == b'\'' {
+            in_string = true;
+            string_char = b;
+        } else if b == b'#' && i > 0 && bytes[i - 1] == b' ' {
+            return line[..i].trim_end().to_string();
+        }
+        i += 1;
+    }
+    line.to_string()
 }

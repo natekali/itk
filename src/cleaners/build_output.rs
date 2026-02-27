@@ -186,7 +186,7 @@ fn clean_cargo_output(s: &str, _aggressive: bool) -> String {
         out.push(format!("\n{fin}"));
     }
     if let Some(err) = &error_summary {
-        out.push(format!("{err}"));
+        out.push(err.to_string());
     }
 
     out.join("\n")

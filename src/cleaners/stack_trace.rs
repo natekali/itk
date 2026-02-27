@@ -41,12 +41,12 @@ pub fn clean_stack_trace(s: &str, lang: &StackTraceLang, aggressive: bool) -> St
         StackTraceLang::Rust => clean_rust_trace(s, aggressive),
         StackTraceLang::Go => clean_go_trace(s, aggressive),
         StackTraceLang::Java => clean_java_trace(s, aggressive),
-        StackTraceLang::Unknown => super::plain::clean_plain(s),
+        StackTraceLang::Unknown => clean_js_trace(s, aggressive),
     }
 }
 
 fn clean_python_trace(s: &str, aggressive: bool) -> String {
-    let frame_limit: usize = if aggressive { 5 } else { 20 };
+    let frame_limit: usize = if aggressive { 5 } else { 10 };
     let mut out = Vec::new();
     let mut in_traceback = false;
     let mut frame_count = 0usize;
@@ -98,7 +98,7 @@ fn clean_python_trace(s: &str, aggressive: bool) -> String {
 }
 
 fn clean_js_trace(s: &str, aggressive: bool) -> String {
-    let frame_limit: usize = if aggressive { 8 } else { 25 };
+    let frame_limit: usize = if aggressive { 5 } else { 12 };
     let mut out = Vec::new();
     let mut frame_count = 0usize;
     let mut truncated = false;
@@ -132,7 +132,7 @@ fn shorten_path(line: &str) -> String {
 }
 
 fn clean_rust_trace(s: &str, aggressive: bool) -> String {
-    let frame_limit: usize = if aggressive { 10 } else { 30 };
+    let frame_limit: usize = if aggressive { 8 } else { 15 };
     let mut out = Vec::new();
     let mut in_backtrace = false;
     let mut frame_count = 0usize;
@@ -151,7 +151,8 @@ fn clean_rust_trace(s: &str, aggressive: bool) -> String {
 
         if in_backtrace {
             if re_rust_frame_numbered().is_match(line) {
-                if aggressive && is_rust_internal_frame(line) {
+                // Always filter internal runtime frames (std::, core::, etc.)
+                if is_rust_internal_frame(line) {
                     continue;
                 }
                 frame_count += 1;
@@ -184,7 +185,7 @@ fn is_rust_internal_frame(line: &str) -> bool {
 }
 
 fn clean_go_trace(s: &str, aggressive: bool) -> String {
-    let frame_limit: usize = if aggressive { 8 } else { 20 };
+    let frame_limit: usize = if aggressive { 5 } else { 10 };
     let mut out = Vec::new();
     let mut in_goroutine = false;
     let mut frame_count = 0usize;
@@ -219,7 +220,7 @@ fn clean_go_trace(s: &str, aggressive: bool) -> String {
 }
 
 fn clean_java_trace(s: &str, aggressive: bool) -> String {
-    let frame_limit: usize = if aggressive { 10 } else { 30 };
+    let frame_limit: usize = if aggressive { 8 } else { 15 };
     let mut out = Vec::new();
     let mut frame_count = 0usize;
     let mut truncated = false;
@@ -235,7 +236,8 @@ fn clean_java_trace(s: &str, aggressive: bool) -> String {
         }
 
         if re_java_frame().is_match(line) {
-            if aggressive && is_java_internal(trimmed) {
+            // Always filter internal JDK frames
+            if is_java_internal(trimmed) {
                 continue;
             }
             frame_count += 1;

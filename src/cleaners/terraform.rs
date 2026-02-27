@@ -35,20 +35,13 @@ pub fn clean_terraform(s: &str, aggressive: bool) -> String {
             continue;
         }
 
-        // Strip comments
+        // Always strip comment-only lines — they waste tokens for LLMs
         if trimmed.starts_with('#') || trimmed.starts_with("//") {
-            if !aggressive {
-                out.push(line.to_string());
-            }
             continue;
         }
 
-        // Strip inline comments
-        let line_content = if aggressive {
-            strip_inline_comment(trimmed)
-        } else {
-            trimmed.to_string()
-        };
+        // Always strip inline comments
+        let line_content = strip_inline_comment(trimmed);
 
         // Aggressive: skip default blocks in variables
         if aggressive && line_content.trim().starts_with("default") && line_content.contains('{') {
@@ -69,8 +62,8 @@ pub fn clean_terraform(s: &str, aggressive: bool) -> String {
             // Single-line default -- keep as-is
         }
 
-        // Aggressive: skip description lines
-        if aggressive && line_content.trim().starts_with("description") {
+        // Always skip description lines — LLMs don't need them
+        if line_content.trim().starts_with("description") {
             continue;
         }
 
@@ -99,15 +92,13 @@ fn strip_inline_comment(line: &str) -> String {
             if b == string_char {
                 in_string = false;
             }
-        } else {
-            if b == b'"' {
-                in_string = true;
-                string_char = b'"';
-            } else if b == b'#' {
-                return line[..i].trim_end().to_string();
-            } else if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-                return line[..i].trim_end().to_string();
-            }
+        } else if b == b'"' {
+            in_string = true;
+            string_char = b'"';
+        } else if b == b'#' {
+            return line[..i].trim_end().to_string();
+        } else if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            return line[..i].trim_end().to_string();
         }
         i += 1;
     }

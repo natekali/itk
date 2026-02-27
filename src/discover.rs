@@ -253,8 +253,7 @@ fn cwd_to_slug(cwd: &std::path::Path) -> String {
     let path_str = cwd.display().to_string();
     // Replace path separators and colons
     path_str
-        .replace('\\', "-")
-        .replace('/', "-")
+        .replace(['\\', '/'], "-")
         .replace(':', "")
 }
 

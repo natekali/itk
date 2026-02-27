@@ -1,6 +1,6 @@
 [package]
 name = "itk"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "Input Token Killer — compress content before pasting into LLMs"
 license = "MIT"

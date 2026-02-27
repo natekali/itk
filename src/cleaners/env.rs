@@ -19,11 +19,8 @@ pub fn clean_env(s: &str, aggressive: bool) -> String {
         }
         blank_run = 0;
 
-        // Comments: keep in non-aggressive, strip in aggressive
+        // Always strip comments — they waste tokens for LLMs
         if trimmed.starts_with('#') {
-            if !aggressive {
-                out.push(trimmed.to_string());
-            }
             continue;
         }
 

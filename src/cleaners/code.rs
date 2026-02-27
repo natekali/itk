@@ -20,16 +20,17 @@ pub fn clean_code(s: &str, lang: &str, aggressive: bool) -> String {
         (trimmed.to_string(), lang.to_string())
     };
 
-    // Apply cleaning passes
+    // Apply cleaning passes — always strip doc comments and trailing whitespace
     let content = code_strip_doc_block_comments(&content, &lang_tag);
+    let content = code_strip_line_doc_comments(&content, &lang_tag);
     let content = code_strip_trailing_comments(&content, &lang_tag);
+    let content = code_strip_trailing_whitespace(&content);
     let content = code_collapse_imports(&content, &lang_tag);
-    // In aggressive mode: strip doc comments, test modules, decorators
+    // In aggressive mode: also strip test modules, decorators
     let content = if aggressive {
-        let content = code_strip_line_doc_comments(&content, &lang_tag);
         let content = code_strip_test_modules(&content, &lang_tag);
-        let content = code_strip_decorators(&content, &lang_tag);
-        content
+        
+        code_strip_decorators(&content, &lang_tag)
     } else {
         content
     };
@@ -67,16 +68,47 @@ fn code_strip_doc_block_comments(s: &str, _lang: &str) -> String {
     out.join("\n")
 }
 
-/// Remove single-line doc comments (///, //!) -- only in aggressive mode for Rust
+/// Remove single-line doc comments (///, //!, #-style for Python)
 fn code_strip_line_doc_comments(s: &str, lang: &str) -> String {
-    if lang != "rust" {
-        return s.to_string();
+    match lang {
+        "rust" => {
+            s.lines()
+                .filter(|l| {
+                    let t = l.trim();
+                    !t.starts_with("///") && !t.starts_with("//!")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        "python" => {
+            // Strip standalone comment lines (not inline comments)
+            s.lines()
+                .filter(|l| {
+                    let t = l.trim();
+                    !t.starts_with('#')
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        "typescript" | "javascript" | "js" | "ts" | "go" | "java" | "kotlin"
+        | "c" | "cpp" | "csharp" | "swift" => {
+            // Strip standalone // comment lines
+            s.lines()
+                .filter(|l| {
+                    let t = l.trim();
+                    !t.starts_with("//")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        _ => s.to_string(),
     }
+}
+
+/// Strip trailing whitespace from every line.
+fn code_strip_trailing_whitespace(s: &str) -> String {
     s.lines()
-        .filter(|l| {
-            let t = l.trim();
-            !t.starts_with("///") && !t.starts_with("//!")
-        })
+        .map(|l| l.trim_end())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -120,21 +152,19 @@ fn strip_trailing_comment_from_line<'a>(line: &'a str, prefix: &str) -> &'a str 
             if b == string_char {
                 in_string = false;
             }
-        } else {
-            if b == b'"' || b == b'\'' || b == b'`' {
-                in_string = true;
-                string_char = b;
-            } else if bytes[i..].starts_with(prefix_bytes) {
-                // Found comment start outside string -- strip and trim trailing whitespace
-                return line[..i].trim_end();
-            }
+        } else if b == b'"' || b == b'\'' || b == b'`' {
+            in_string = true;
+            string_char = b;
+        } else if bytes[i..].starts_with(prefix_bytes) {
+            // Found comment start outside string -- strip and trim trailing whitespace
+            return line[..i].trim_end();
         }
         i += 1;
     }
     line
 }
 
-/// Collapse import/use/from blocks of >= 4 consecutive lines into a summary.
+/// Collapse import/use/from blocks of >= 3 consecutive lines into a summary.
 fn code_collapse_imports(s: &str, lang: &str) -> String {
     let import_prefix: &[&str] = match lang {
         "rust" => &["use "],
@@ -164,7 +194,7 @@ fn code_collapse_imports(s: &str, lang: &str) -> String {
                 i += 1;
             }
             let count = i - start;
-            if count >= 4 {
+            if count >= 3 {
                 // Extract module names for display (up to 4)
                 let names: Vec<&str> = lines[start..i]
                     .iter()
@@ -295,7 +325,7 @@ fn code_collapse_getters_setters(s: &str, lang: &str) -> String {
             }
         } else {
             // Flush accumulated getters/setters
-            if getter_names.len() >= 4 {
+            if getter_names.len() >= 3 {
                 if let Some(start) = getter_start {
                     // Remove any already-added getter lines
                     out.truncate(start);
@@ -314,7 +344,7 @@ fn code_collapse_getters_setters(s: &str, lang: &str) -> String {
         }
     }
     // Flush final batch
-    if getter_names.len() >= 4 {
+    if getter_names.len() >= 3 {
         if let Some(start) = getter_start {
             out.truncate(start);
         }

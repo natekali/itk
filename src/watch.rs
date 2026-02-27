@@ -7,10 +7,12 @@
 
 use crate::cleaners;
 use crate::clipboard;
+use crate::config;
 use crate::db;
 use crate::detect;
 use crate::frame;
 use crate::style;
+use crate::tokens;
 use crate::undo;
 
 use std::collections::hash_map::DefaultHasher;
@@ -38,6 +40,10 @@ pub fn run() {
     // Set up Ctrl+C handler
     let running = Arc::new(AtomicBool::new(true));
     setup_ctrlc(running.clone());
+
+    // Load config once (respect aggressive/compact defaults)
+    let cfg = config::load().unwrap_or_default();
+    let effective_aggressive = cfg.defaults.aggressive || cfg.defaults.compact;
 
     let mut last_hash: u64 = 0;
     let mut runs: u32 = 0;
@@ -73,12 +79,9 @@ pub fn run() {
             continue;
         }
 
-        // Save for undo before modifying
-        undo::save(&content);
-
-        // Clean
+        // Clean (respects config defaults for aggressive/compact)
         let opts = cleaners::CleanOptions {
-            aggressive: false,
+            aggressive: effective_aggressive,
             _diff_mode: false,
             content_type: ct.clone(),
         };
@@ -88,17 +91,12 @@ pub fn run() {
         let fc = frame::build_frame(&cleaned, &ct);
         let framed = frame::render_framed(&cleaned, &fc, None);
 
-        // Estimate tokens (simple word count for watch mode -- fast)
-        let original_words = content.split_whitespace().count() as u64;
-        let cleaned_words = cleaned.split_whitespace().count() as u64;
-        let saved = original_words as i64 - cleaned_words as i64;
+        // Estimate tokens using the same calibrated estimator as the main CLI
+        let original_tokens = tokens::estimate(&content, &ct);
+        let cleaned_tokens = tokens::estimate(&cleaned, &ct);
+        let saved = original_tokens as i64 - cleaned_tokens as i64;
 
         let type_label = ct.label();
-
-        // Record in database (best-effort)
-        if let Ok(mut conn) = db::open() {
-            let _ = db::record_run(&mut conn, &type_label, original_words, cleaned_words);
-        }
 
         // If no savings (or content grew), skip modification
         if saved <= 0 {
@@ -110,14 +108,22 @@ pub fn run() {
             continue;
         }
 
+        // Save for undo ONLY when we're actually going to modify the clipboard
+        undo::save(&content);
+
+        // Record in database ONLY for runs with actual savings
+        if let Ok(mut conn) = db::open() {
+            let _ = db::record_run(&mut conn, &type_label, original_tokens, cleaned_tokens);
+        }
+
         // Write cleaned content to clipboard
         match clipboard::write(&framed) {
             Ok(()) => {
                 runs += 1;
                 total_saved += saved;
 
-                let pct = if original_words > 0 {
-                    saved * 100 / original_words as i64
+                let pct = if original_tokens > 0 {
+                    saved * 100 / original_tokens as i64
                 } else {
                     0
                 };
@@ -126,8 +132,8 @@ pub fn run() {
                 eprintln!("  {} {} {} -> {} tokens ({}) {}",
                     style::dim("itk:"),
                     style::info(&format!("[{}]", type_label)),
-                    original_words,
-                    cleaned_words,
+                    original_tokens,
+                    cleaned_tokens,
                     style::savings_colored(&savings_str, true),
                     style::success("v")
                 );

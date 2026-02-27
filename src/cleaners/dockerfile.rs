@@ -54,11 +54,8 @@ pub fn clean_dockerfile(s: &str, aggressive: bool) -> String {
         }
         blank_run = 0;
 
-        // Skip comments in aggressive mode
+        // Always strip comments — they waste tokens for LLM context
         if trimmed.starts_with('#') {
-            if !aggressive {
-                out.push(trimmed.to_string());
-            }
             continue;
         }
 
