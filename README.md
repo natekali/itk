@@ -6,7 +6,7 @@
 
 [GitHub](https://github.com/natekali/itk)
 
-itk auto-detects what you're pasting — stack traces, JSON, YAML, diffs, logs, code, build output, markdown — cleans it, frames it with context annotations, and optionally wraps it in research-backed prompt templates. Your LLM gets better input, you save tokens and money.
+itk auto-detects what you're pasting — stack traces, JSON, YAML, diffs, logs, code, build output, markdown, HTML, SQL, CSV, Dockerfiles, .env files, Terraform — cleans it, frames it with context annotations, and optionally wraps it in research-backed prompt templates. Your LLM gets better input, you save tokens and money.
 
 **RTK kills noise in output. ITK frames signal in input.**
 
@@ -28,8 +28,11 @@ ITK solves this in <100ms, offline, with zero config:
 | Git diff (3 files) | ~1,800 | ~800 | **-55%** | Drops excess context lines, keeps +/- |
 | Log file (1K lines) | ~8,000 | ~1,600 | **-80%** | Deduplicates, strips timestamps/ANSI |
 | Markdown README | ~2,400 | ~1,400 | **-43%** | Removes badges, license/install sections |
+| .env file | ~500 | ~450 | **-10%** | **Masks secret values** (API keys, tokens, passwords) |
+| CSV (10K rows) | ~80,000 | ~1,200 | **-98%** | Shows header + first 5 rows + summary |
+| HTML page | ~12,000 | ~4,000 | **-67%** | Strips tags, scripts, styles, extracts text |
 
-*\*Even at 0% compression, framing gives the LLM instant context about the content — improving response quality without removing a single line.*
+*\*Even at 0% compression, framing gives the LLM instant context about the content -- improving response quality without removing a single line.*
 
 > Token estimates based on typical real-world inputs. Actual savings vary by content size and structure.
 
@@ -38,17 +41,17 @@ ITK solves this in <100ms, offline, with zero config:
 ```
   Without ITK:
 
-  ┌──────────┐  paste 5,200 tokens  ┌──────────┐
-  │   You    │ ───────────────────> │   LLM    │   "What is this YAML?"
-  └──────────┘   raw, unstructured  └──────────┘   LLM guesses context
+  +----------+  paste 5,200 tokens  +----------+
+  |   You    | ------------------> |   LLM    |   "What is this YAML?"
+  +----------+   raw, unstructured  +----------+   LLM guesses context
                                                    from scratch
 
 
   With ITK:
 
-  ┌──────────┐  copy    ┌──────────┐  paste 2,100 tokens    ┌──────────┐
-  │   You    │ ──────> │   ITK    │ ─────────────────────> │   LLM    │
-  └──────────┘         └──────────┘   framed + compressed   └──────────┘
+  +----------+  copy    +----------+  paste 2,100 tokens    +----------+
+  |   You    | ------> |   ITK    | ---------------------> |   LLM    |
+  +----------+         +----------+   framed + compressed   +----------+
                         <100ms                               LLM knows exactly
                         offline                              what it's looking at
                         zero config
@@ -56,10 +59,10 @@ ITK solves this in <100ms, offline, with zero config:
 
 Four stages, applied per content type:
 
-1. **Detect** — scan first 4 KB against compiled regex patterns to classify content
-2. **Clean** — route to type-specific cleaner (collapse frames, strip noise, deduplicate)
-3. **Frame** — wrap with `[type | lines | annotations]` context header
-4. **Prompt** — optionally wrap in a role-prompted template with structured output
+1. **Detect** -- scan first 8 KB against compiled regex patterns to classify content
+2. **Clean** -- route to type-specific cleaner (collapse frames, strip noise, deduplicate)
+3. **Frame** -- wrap with `[type | lines | annotations]` context header
+4. **Prompt** -- optionally wrap in a role-prompted template with structured output
 
 ---
 
@@ -87,7 +90,7 @@ itk update
 
 ### Verify
 ```bash
-itk --version    # Should show "itk 0.3.0"
+itk --version    # Should show "itk 0.4.0"
 ```
 
 ## Quick Start
@@ -97,14 +100,111 @@ itk --version    # Should show "itk 0.3.0"
 # 2. Run itk
 itk
 
-# 3. Paste into your LLM — content is now cleaned, framed, and optimized
+# 3. Paste into your LLM -- content is now cleaned, framed, and optimized
 # That's it. No config, no flags needed.
 
 # Or pipe directly:
 cat error.log | itk
 git diff | itk --diff
 curl -s api.example.com/data | itk --compact
+
+# Process files directly:
+itk src/main.rs --prompt review
+itk error.log --stats
+itk config.yaml --compact
 ```
+
+---
+
+## Zero-Friction: Claude Code Integration
+
+Install once, never think about it again. ITK automatically optimizes large prompts before they reach Claude:
+
+```bash
+itk init --global          # Install hook + ITK.md globally
+itk init                   # Install for current project only
+itk init --show            # Show current hook status
+itk init --global --uninstall  # Remove everything
+```
+
+After `itk init`, every large prompt you submit is automatically cleaned and framed. The hook uses `additionalContext` -- your original prompt is preserved, the LLM gets both the raw and optimized versions.
+
+---
+
+## File Input Mode
+
+Process files directly without clipboard gymnastics:
+
+```bash
+itk error.log                    # Clean file, write to clipboard
+itk src/main.rs --prompt review  # Frame + prompt-wrap a source file
+itk config.yaml --compact        # Compact a config file
+cat a.log b.log | itk            # Pipe still works
+```
+
+---
+
+## Preview Mode
+
+See what ITK would do without modifying the clipboard:
+
+```bash
+itk --dry-run
+```
+
+```
++-- ITK Preview -------------------------------------------+
+| Detected: trace/python (23 lines)
+| Savings:  2,400 -> 600 tokens (-75%)
+| Frame:    [trace/python | 5 frames | KeyError]
+| Lines:    23 -> 18 (5 removed)
++----------------------------------------------------------+
+[cleaned content written to stdout for inspection]
+```
+
+---
+
+## Content Types (15 supported)
+
+ITK auto-detects content type by scanning the first 8 KB. Override with `--type <TYPE>`.
+
+| Type | Detection | Frame Annotation Example |
+|---|---|---|
+| **Stack traces** (Python/JS/Rust/Go/Java) | `Traceback`, `at Object.`, `panic:` | `[trace/python \| 23 lines \| 5 frames \| KeyError]` |
+| **Git diffs** | `diff --git`, `@@`, `+/-` | `[git-diff \| 32 lines \| 2 file(s) \| +17/-0]` |
+| **Log files** | Timestamps + ERROR/WARN/INFO | `[log \| 200 lines \| 4 error(s) \| 3 warning(s)]` |
+| **JSON** | `{` / `[` + valid structure | `[json \| 42 lines \| 4 top-level keys \| error response]` |
+| **YAML** | `key: value`, Kubernetes/Docker Compose | `[yaml \| 156 lines \| K8s Deployment \| 3 containers]` |
+| **Code** (Rust/Python/TS/JS/Go/Java) | Language-specific syntax | `[code/typescript \| 234 lines \| 5 exported \| 12 functions]` |
+| **Build output** (Cargo/TSC/ESLint) | `error[E`, `TS2`, `eslint` | `[build/cargo \| 45 lines \| 3 errors \| 1 warning]` |
+| **Markdown** | `#`, `**`, `[text](url)` | `[markdown \| 120 lines \| 8 headings \| 3 code blocks]` |
+| **HTML** | `<html`, `<!DOCTYPE`, `<div` | `[html \| 234 lines \| 3 forms \| 12 inputs]` |
+| **SQL** | `SELECT`, `CREATE TABLE`, `INSERT` | `[sql \| 45 lines \| 3 queries \| JOIN detected]` |
+| **CSV** | Comma-delimited header row | `[csv \| 10,000 rows \| 8 columns]` |
+| **Dockerfile** | `FROM`, `RUN`, `COPY`, `EXPOSE` | `[dockerfile \| 34 lines \| 2 stages \| EXPOSE 3000]` |
+| **.env** | `KEY=value` lines | `[env \| 12 vars \| 3 secrets masked]` |
+| **Terraform** | `resource "`, `variable "` | `[terraform \| 89 lines \| 4 resources \| 2 modules]` |
+| **Plain text** | Fallback | `[text \| 50 lines]` |
+
+### .env Secret Masking
+
+ITK automatically masks sensitive values in `.env` files to prevent accidental leaking into LLM context:
+
+```
+# Before
+DATABASE_URL=postgres://admin:s3cret@db.example.com:5432/prod
+API_KEY=sk-abc123xyz
+JWT_SECRET=my-super-secret-key
+APP_NAME=my-app
+
+# After (itk)
+DATABASE_URL=***
+API_KEY=***
+JWT_SECRET=***
+APP_NAME=my-app
+```
+
+Detects 30+ secret patterns: `SECRET`, `KEY`, `TOKEN`, `PASSWORD`, `API_KEY`, `DATABASE_URL`, `PRIVATE`, `CREDENTIAL`, and more.
 
 ---
 
@@ -116,7 +216,7 @@ Every `itk` invocation wraps output with a lightweight context header:
 [type | line count | smart annotations extracted from content]
 ```
 
-This costs ~10-30 tokens but gives LLMs instant orientation — no more wasting tokens figuring out what they're looking at.
+This costs ~10-30 tokens but gives LLMs instant orientation -- no more wasting tokens figuring out what they're looking at.
 
 **Python stack trace:**
 ```
@@ -146,37 +246,6 @@ kind: Deployment
 }
 ```
 
-**TypeScript code:**
-```
-[code/typescript | 234 lines | 5 exported | 12 functions | 3 types/classes]
-export function Dashboard() { ... }
-```
-
-**Git diff:**
-```
-[git-diff | 32 lines | 2 file(s) | +17/-0]
-diff --git a/src/main.rs b/src/main.rs
-...
-```
-
-**Log file:**
-```
-[log | 200 lines | 4 error(s) | 3 warning(s)]
-2024-01-15 10:30:11 ERROR Connection refused to database replica-2
-  [... 2 identical lines suppressed]
-...
-```
-
-**Docker Compose YAML:**
-```
-[yaml | 89 lines | Docker Compose | 4 service(s)]
-```
-
-**GitHub Actions YAML:**
-```
-[yaml | 112 lines | GitHub Actions workflow | 3 job(s)]
-```
-
 Disable framing with `--no-frame` for raw cleaned output.
 
 ---
@@ -185,17 +254,23 @@ Disable framing with `--no-frame` for raw cleaned output.
 
 | Content | Default (clean + frame) | `--compact` | `--aggressive` |
 |---|---|---|---|
-| **Stack traces** (Python/JS/Rust/Go/Java) | Collapse internal frames, extract root cause | — | Truncate deep traces |
-| **Git diff / patch** | Drop excess context lines, keep all +/- | — | Deeper context trimming |
-| **Log files** | Strip ANSI, strip timestamps, deduplicate | — | Remove progress bars |
+| **Stack traces** (Python/JS/Rust/Go/Java) | Collapse internal frames, extract root cause | -- | Truncate deep traces |
+| **Git diff / patch** | Drop excess context lines, keep all +/- | -- | Deeper context trimming |
+| **Log files** | Strip ANSI, strip timestamps, deduplicate | -- | Remove progress bars |
 | **JSON** | Pretty-print, summarise arrays, extract errors | Truncate long strings, round floats | Strip metadata keys (`_links`, `__typename`, etc.) |
-| **YAML** | Strip comments, collapse blanks | — | Remove `status:` sections, strip defaults |
-| **Code** | Collapse blank runs, wrap in fenced block | — | Strip doc comments, collapse imports, remove test modules |
-| **Build output** (Cargo/TSC/ESLint) | Group errors by file | — | Deeper deduplication |
-| **Markdown** | Collapse blanks | — | Remove badges, installation/license sections |
-| **Plain text** | Strip ANSI, trim whitespace | — | Deduplicate repeated lines, remove ASCII borders |
+| **YAML** | Strip comments, collapse blanks | -- | Remove `status:` sections, strip defaults |
+| **Code** | Collapse blank runs, wrap in fenced block | -- | Strip doc comments, collapse imports, remove test modules |
+| **Build output** (Cargo/TSC/ESLint) | Group errors by file | -- | Deeper deduplication |
+| **Markdown** | Collapse blanks | -- | Remove badges, installation/license sections |
+| **HTML** | Strip comments, remove script/style blocks | -- | Strip all tags, extract pure text content |
+| **SQL** | Remove comments, normalize whitespace | Uppercase keywords | Collapse INSERT VALUES rows |
+| **CSV** | Header + first 5 data rows + summary | -- | Header + first 3 rows, truncate long cells |
+| **Dockerfile** | Collapse blanks | -- | Strip comments, collapse multi-line RUN |
+| **.env** | Mask secret values (`API_KEY=***`) | -- | Also strip comments |
+| **Terraform** | Strip comments | -- | Remove defaults, collapse description blocks |
+| **Plain text** | Strip ANSI, trim whitespace | -- | Deduplicate repeated lines, remove ASCII borders |
 
-Auto-detection scans the first 4 KB — no config needed. Override with `--type`.
+Auto-detection scans the first 8 KB -- no config needed. Override with `--type`.
 
 ---
 
@@ -203,7 +278,7 @@ Auto-detection scans the first 4 KB — no config needed. Override with `--type`
 
 | Level | Flag | What it does | Best for |
 |---|---|---|---|
-| **Default** | *(none)* | Clean + Frame | Daily use — safe, preserves everything |
+| **Default** | *(none)* | Clean + Frame | Daily use -- safe, preserves everything |
 | **Compact** | `-c` / `--compact` | + string truncation (>200 chars), float rounding (2dp) | Large JSON/YAML payloads |
 | **Aggressive** | `--aggressive` | + metadata removal, section stripping, test module removal | Huge dumps, Kubernetes `kubectl get` output |
 
@@ -220,15 +295,18 @@ itk --prompt fix        # "Identify the root cause and provide a minimal fix"
 itk --prompt explain    # "Explain what this code does / what caused this error"
 itk --prompt refactor   # "Refactor for readability and maintainability"
 itk --prompt review     # "Review for bugs, security, performance, anti-patterns"
-itk --prompt debug      # "Help me debug this — identify the most likely cause"
+itk --prompt debug      # "Help me debug this -- identify the most likely cause"
 itk --prompt test       # "Write unit tests for this code"
 itk --prompt optimize   # "Identify performance bottlenecks and suggest optimizations"
 itk --prompt convert    # "Convert to the most appropriate equivalent format"
+itk --prompt document   # "Generate documentation for all public items"
+itk --prompt migrate    # "Migrate to the target framework/language"
+itk --prompt security   # "Audit for security vulnerabilities"
 ```
 
 ### What makes these prompts better
 
-Templates are **content-type-aware** — a `--prompt fix` on a stack trace produces a completely different prompt than on code:
+Templates are **content-type-aware** -- a `--prompt fix` on a stack trace produces a completely different prompt than on code:
 
 **Stack trace + `--prompt fix`:**
 ```
@@ -249,8 +327,8 @@ Respond with:
 ```
 
 **Why this works:**
-- **Role prompting**: *"You are a senior {lang} developer..."* — 10-15% accuracy improvement (research-backed)
-- **Structured output format**: *"Respond with: 1. Root cause 2. Fix 3. Prevention"* — reduces hallucination
+- **Role prompting**: *"You are a senior {lang} developer..."* -- 10-15% accuracy improvement (research-backed)
+- **Structured output format**: *"Respond with: 1. Root cause 2. Fix 3. Prevention"* -- reduces hallucination
 - **Context framing**: LLM instantly knows it's a Python SQLAlchemy trace, not generic text
 
 Combine with `--focus` to direct attention:
@@ -261,117 +339,32 @@ itk --prompt review --focus "the auth middleware"
 
 ---
 
-## Examples — Standard vs ITK
+## Find Missed Savings
 
-### Stack trace
+Discover how much you could have saved on recent Claude Code sessions:
 
-**Before** (raw paste, ~140 tokens):
-```
-Traceback (most recent call last):
-  File "/app/main.py", line 234, in handle_request
-    result = process_order(request.data)
-  File "/app/services/orders.py", line 89, in process_order
-    user = get_user(order["user_id"])
-  File "/app/services/users.py", line 45, in get_user
-    return db.session.query(User).filter_by(id=user_id).one()
-  File "/venv/lib/sqlalchemy/orm/query.py", line 3423, in one
-    raise NoResultFound("No row was found")
-  File "/venv/lib/sqlalchemy/engine/result.py", line 560, in one_or_none
-    return self._only_one_row(True, True, False)
-  File "/venv/lib/sqlalchemy/engine/result.py", line 498, in _only_one_row
-    raise NoResultFound("No row was found when one was required")
-sqlalchemy.exc.NoResultFound: No row was found when one was required
+```bash
+itk discover                    # Current project, last 30 days
+itk discover --all              # All Claude Code projects
+itk discover --since 7          # Last 7 days
 ```
 
-**After** (`itk --aggressive`, ~107 tokens, -23%):
+Example output:
 ```
-[trace/python | 13 lines | 5 frames | sqlalchemy.exc.NoResultFound: No row was found]
-Traceback (most recent call last):
-  File "/app/main.py", line 234, in handle_request
-    result = process_order(request.data)
-  File "/app/services/orders.py", line 89, in process_order
-    user = get_user(order["user_id"])
-  File "/app/services/users.py", line 45, in get_user
-    return db.session.query(User).filter_by(id=user_id).one()
-  File "/venv/lib/sqlalchemy/orm/query.py", line 3423, in one
-    raise NoResultFound("No row was found")
-  ... [frames truncated by itk]
-sqlalchemy.exc.NoResultFound: No row was found when one was required
-```
+ITK Discover -- Missed Savings
+====================================================
+Scanned: 89 sessions (last 30 days), 342 user messages with pasted content
 
-### Git diff
-
-**Before** (raw, ~180 tokens):
-```
-diff --git a/src/main.rs b/src/main.rs
-index abc1234..def5678 100644
---- a/src/main.rs
-+++ b/src/main.rs
-@@ -10,6 +10,8 @@ fn main() {
-     let config = Config::load();
-     let db = Database::connect(&config.db_url);
-     let server = Server::new(config.port);
-+    let auth = AuthMiddleware::new(&config.jwt_secret);
-+    server.use_middleware(auth);
-     server.start();
- }
-```
-
-**After** (`itk --diff`, ~180 tokens, framed):
-```
-[git-diff | 32 lines | 2 file(s) | +17/-0]
-diff --git a/src/main.rs b/src/main.rs
- ... [1 context lines omitted]
-     let db = Database::connect(&config.db_url);
-     let server = Server::new(config.port);
-+    let auth = AuthMiddleware::new(&config.jwt_secret);
-+    server.use_middleware(auth);
-     server.start();
-```
-
-### Log file
-
-**Before** (raw, 20 lines — imagine 200):
-```
-2024-01-15 10:30:11 ERROR Connection refused to database replica-2 at 10.0.1.5:5432
-2024-01-15 10:30:11 ERROR Connection refused to database replica-2 at 10.0.1.5:5432
-2024-01-15 10:30:11 ERROR Connection refused to database replica-2 at 10.0.1.5:5432
-...
-```
-
-**After** (`itk --aggressive`, deduplicated + annotated):
-```
-[log | 19 lines | 2 error(s) | 3 warning(s)]
-2024-01-15 10:30:11 ERROR Connection refused to database replica-2 at 10.0.1.5:5432
-  [... 2 identical lines suppressed]
-2024-01-15 10:30:12 WARN  Failover to replica-3 initiated
-...
-```
-
----
-
-## All Options
-
-```
-itk [OPTIONS] [COMMAND]
-
-COMMANDS:
-  gain [--history]   Token savings dashboard
-  update             Update itk to the latest release
-
-OPTIONS:
-      --no-frame         Disable context framing (raw cleaned output)
-  -c, --compact          Safe compression: string truncation, number rounding
-      --aggressive       Deep compression: strip metadata, remove defaults
-      --diff             Optimise for git diff / patch format
-      --type <TYPE>      Force content type: diff, log, json, yaml, trace,
-                         rust, python, js, ts, go, java, markdown, build
-      --prompt <TYPE>    Wrap in prompt template: fix|explain|refactor|review|
-                         debug|test|optimize|convert
-      --focus <TEXT>     Direct LLM attention to a specific area
-      --stats            Print token savings as a header comment
-  -h, --help
-  -V, --version
+CONTENT YOU COULD HAVE OPTIMIZED
+----------------------------------------------------
+Content Type          Count    Est. Tokens    Potential Savings
+Stack traces             23       ~18.4K           ~13.8K (-75%)
+JSON payloads            31       ~42.1K           ~15.6K (-37%)
+Log files                 8       ~12.0K            ~9.6K (-80%)
+Code files               19       ~28.5K            ~3.1K (-11%)
+Git diffs                12        ~8.4K            ~4.6K (-55%)
+----------------------------------------------------
+Total: 93 messages -> ~46.7K tokens saveable
 ```
 
 ---
@@ -381,26 +374,33 @@ OPTIONS:
 Track your savings over time:
 
 ```bash
-itk gain
+itk gain                      # Today + all time overview
+itk gain --since 7            # Today + last 7 days
+itk gain --daily              # Day-by-day breakdown (last 30 days)
+itk gain --daily --since 7    # Day-by-day for last 7 days
+itk gain --history            # Per-run history (last 50 runs)
+itk gain --format json        # Export all runs as JSON
+itk gain --format csv         # Export all runs as CSV
+itk gain --format json --since 7  # Export last 7 days as JSON
 ```
 
 ```
-┌───────────────────────────────────────────────────┐
-│               ITK — Token Savings                  │
-├────────────────┬──────────────────┬───────────────┤
-│                │     Today        │   All Time    │
-├────────────────┼──────────────────┼───────────────┤
-│ Runs           │             14   │           47  │
-│ Tokens in      │          23.1K   │        87.4K  │
-│ Tokens out     │           8.4K   │        31.2K  │
-│ Tokens saved   │          14.7K   │        56.2K  │
-│ Avg savings    │          63.6%   │        64.3%  │
-│ Est. cost saved│         $0.0735  │       $0.2810 │
-└────────────────┴──────────────────┴───────────────┘
++-------------------------------------------------+
+|               ITK -- Token Savings               |
++----------------+------------------+--------------+
+|                |            Today |     All Time |
++----------------+------------------+--------------+
+| Runs           |               14 |           47 |
+| Tokens in      |           23.1K |        87.4K |
+| Tokens out     |            8.4K |        31.2K |
+| Tokens saved   |           14.7K |        56.2K |
+| Avg savings    |           63.6% |        64.3% |
+| Est. cost saved|          $0.0735 |      $0.2810 |
++----------------+------------------+--------------+
 
   By content type (all time):
   Type                       Runs  Avg savings
-  ──────────────────────────────────────────────
+  ----------------------------------------------
   trace/rust                   12       71.2%
   git-diff                     10       58.4%
   log                           9       81.0%
@@ -409,31 +409,100 @@ itk gain
   text                          3       28.7%
 ```
 
+---
+
+## Config File
+
+Optional per-project or global defaults via `.itk.json`:
+
+```json
+{
+  "defaults": {
+    "compact": true,
+    "aggressive": false,
+    "no_frame": false,
+    "stats": true
+  }
+}
+```
+
+Search order: `./.itk.json` (project) > `~/.config/itk/config.json` (global). CLI flags always override config.
+
+---
+
+## Shell Completions
+
+Generate completions for your shell:
+
 ```bash
-itk gain --history    # Per-run history (last 50 runs)
+itk completions bash > /etc/bash_completion.d/itk
+itk completions zsh > ~/.zfunc/_itk
+itk completions fish > ~/.config/fish/completions/itk.fish
+itk completions powershell > itk.ps1
 ```
 
 ---
 
-## ITK + RTK — The Complete Pair
+## All Options
+
+```
+itk [OPTIONS] [FILE] [COMMAND]
+
+COMMANDS:
+  gain                  Token savings dashboard
+    --history           Show per-run history (last 50 runs)
+    --daily             Show day-by-day breakdown
+    --since <DAYS>      Only show data from the last N days
+    --format <FORMAT>   Export format: json, csv
+  discover              Find missed savings in Claude Code sessions
+    --all               Scan all projects (not just current)
+    --since <DAYS>      Only scan sessions from last N days (default: 30)
+  init                  Install Claude Code hook for automatic optimization
+    --global, -g        Install globally (~/.claude/)
+    --show              Show current hook status
+    --uninstall         Remove ITK hook and ITK.md
+  completions <SHELL>   Generate shell completions (bash/zsh/fish/powershell)
+  update                Update itk to the latest release
+
+OPTIONS:
+      --no-frame         Disable context framing (raw cleaned output)
+  -c, --compact          Safe compression: string truncation, number rounding
+      --aggressive       Deep compression: strip metadata, remove defaults
+      --diff             Optimise for git diff / patch format
+      --type <TYPE>      Force content type: diff, log, json, yaml, trace,
+                         rust, python, js, ts, go, java, markdown, build,
+                         html, sql, csv, dockerfile, env, terraform
+      --prompt <TYPE>    Wrap in prompt template: fix|explain|refactor|review|
+                         debug|test|optimize|convert|document|migrate|security
+      --focus <TEXT>     Direct LLM attention to a specific area
+      --stats            Print token savings as a header comment
+      --dry-run          Preview without modifying clipboard
+  -h, --help
+  -V, --version
+```
+
+---
+
+## ITK + RTK -- The Complete Pair
 
 | | RTK | ITK |
 |---|---|---|
-| **Direction** | Output (command → LLM) | Input (you → LLM) |
-| **How** | Proxy wrapping CLI commands | Clipboard/pipe processor |
-| **When** | Automatic via hook | Manual: copy → `itk` → paste |
+| **Direction** | Output (command -> LLM) | Input (you -> LLM) |
+| **How** | Proxy wrapping CLI commands | Clipboard/pipe/file processor |
+| **When** | Automatic via hook | Automatic via `itk init`, or manual |
 | **Savings** | 60-90% on command output | 10-80% on pasted content |
 | **Unique value** | Filters noise from `git`, `cargo`, `ls` | Frames and prompt-wraps your content |
 
 Use both together for maximum token efficiency:
 
 ```bash
-# RTK handles output — automatic via hook
+# RTK handles output -- automatic via hook
 rtk git diff          # LLM sees compact diff
 rtk cargo test        # LLM sees failures only
 
-# ITK handles input — you paste smarter
+# ITK handles input -- automatic via itk init, or manual
 itk                   # Clean + frame clipboard
+itk error.log         # Process a file directly
 itk --prompt fix      # Wrap in fix-request prompt
 ```
 
@@ -441,12 +510,13 @@ itk --prompt fix      # Wrap in fix-request prompt
 
 ## Design Principles
 
-- **Frame first, compress second** — even 0% compression adds value through context framing
-- **Never panic** — `catch_unwind` wraps the clean path; any failure returns input unchanged
-- **Pipeline-safe** — stdout is pure signal; all diagnostics go to stderr
-- **Zero config** — no config files needed; history DB created lazily
-- **Idempotent** — running `itk` twice on already-cleaned content is safe
-- **Sub-100ms** — no network, no LLM, compiled regexes via `OnceLock`
+- **Frame first, compress second** -- even 0% compression adds value through context framing
+- **Never panic** -- `catch_unwind` wraps the clean path; any failure returns input unchanged
+- **Pipeline-safe** -- stdout is pure signal; all diagnostics go to stderr
+- **Zero config** -- no config files needed; history DB created lazily
+- **Idempotent** -- running `itk` twice on already-cleaned content is safe
+- **Sub-100ms** -- no network, no LLM, compiled regexes via `OnceLock`
+- **Secret-safe** -- .env files have sensitive values masked automatically
 
 ---
 
@@ -455,9 +525,10 @@ itk --prompt fix      # Wrap in fix-request prompt
 ### No clipboard access
 **Problem**: `itk: clipboard not available` on headless/SSH/WSL systems
 
-**Solution**: Use pipe mode instead:
+**Solution**: Use pipe mode or file mode instead:
 ```bash
 cat error.log | itk > cleaned.txt
+itk error.log > cleaned.txt
 ```
 
 ### Wrong content type detected
@@ -468,6 +539,8 @@ cat error.log | itk > cleaned.txt
 itk --type rust
 itk --type json
 itk --type yaml
+itk --type html
+itk --type terraform
 ```
 
 ### Frame overhead on small inputs
@@ -483,11 +556,19 @@ itk --no-frame
 
 **Expected**: Not all content can be compressed (clean YAML, minimal JSON). The context frame still adds value by giving the LLM instant orientation. Use `--compact` or `--aggressive` for deeper compression.
 
+### Preview before committing
+**Problem**: Want to see what ITK would do before modifying clipboard
+
+**Solution**: Use dry-run mode:
+```bash
+itk --dry-run
+```
+
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+MIT -- see [LICENSE](LICENSE)
 
 ---
 

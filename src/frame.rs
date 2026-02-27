@@ -22,6 +22,12 @@ pub fn build_frame(content: &str, ct: &ContentType) -> FrameContext {
         ContentType::LogFile => annotate_log(content),
         ContentType::BuildOutput(_) => annotate_build(content),
         ContentType::Markdown => annotate_markdown(content),
+        ContentType::Html => annotate_html(content),
+        ContentType::Sql => annotate_sql(content),
+        ContentType::Csv => annotate_csv(content),
+        ContentType::Dockerfile => annotate_dockerfile(content),
+        ContentType::EnvFile => annotate_env(content),
+        ContentType::Terraform => annotate_terraform(content),
         ContentType::PlainText => annotate_plain(content),
     };
     FrameContext { type_label, line_count, annotations }
@@ -385,4 +391,158 @@ fn annotate_markdown(s: &str) -> Vec<String> {
 fn annotate_plain(s: &str) -> Vec<String> {
     let words = s.split_whitespace().count();
     vec![format!("~{words} words")]
+}
+
+// ── HTML annotations ────────────────────────────────────────────────────────
+
+fn annotate_html(s: &str) -> Vec<String> {
+    let mut notes = Vec::new();
+
+    let forms = s.lines().filter(|l| l.contains("<form")).count();
+    let inputs = s.lines().filter(|l| l.contains("<input")).count();
+    let scripts = s.lines().filter(|l| l.contains("<script")).count();
+
+    if forms > 0 {
+        notes.push(format!("{forms} form(s)"));
+    }
+    if inputs > 0 {
+        notes.push(format!("{inputs} input(s)"));
+    }
+    if scripts > 0 {
+        notes.push(format!("{scripts} script(s)"));
+    }
+    if s.contains("<table") {
+        notes.push("contains table".to_string());
+    }
+    if s.contains("<nav") || s.contains("<header") {
+        notes.push("has navigation".to_string());
+    }
+
+    notes
+}
+
+// ── SQL annotations ─────────────────────────────────────────────────────────
+
+fn annotate_sql(s: &str) -> Vec<String> {
+    let mut notes = Vec::new();
+    let upper = s.to_uppercase();
+
+    let queries = ["SELECT", "INSERT", "UPDATE", "DELETE"];
+    let query_counts: Vec<(&str, usize)> = queries.iter().map(|q| {
+        let count = upper.matches(q).count();
+        (*q, count)
+    }).filter(|(_, c)| *c > 0).collect();
+
+    for (q, c) in &query_counts {
+        notes.push(format!("{c} {}", q.to_lowercase()));
+    }
+
+    if upper.contains("JOIN") {
+        notes.push("JOIN detected".to_string());
+    }
+    if upper.contains("CREATE TABLE") {
+        let tables = upper.matches("CREATE TABLE").count();
+        notes.push(format!("{tables} table def(s)"));
+    }
+
+    notes
+}
+
+// ── CSV annotations ─────────────────────────────────────────────────────────
+
+fn annotate_csv(s: &str) -> Vec<String> {
+    let mut notes = Vec::new();
+    let total_rows = s.lines().count().saturating_sub(1);
+    let col_count = s.lines().next().map(|l| l.split(',').count()).unwrap_or(0);
+
+    notes.push(format!("{total_rows} rows"));
+    notes.push(format!("{col_count} columns"));
+
+    if let Some(header) = s.lines().next() {
+        let cols: Vec<&str> = header.split(',').take(5).map(|c| c.trim()).collect();
+        let display = if col_count > 5 {
+            format!("{}, ...", cols.join(", "))
+        } else {
+            cols.join(", ")
+        };
+        notes.push(display);
+    }
+
+    notes
+}
+
+// ── Dockerfile annotations ──────────────────────────────────────────────────
+
+fn annotate_dockerfile(s: &str) -> Vec<String> {
+    let mut notes = Vec::new();
+
+    let stages = s.lines().filter(|l| l.trim().starts_with("FROM ")).count();
+    if stages > 1 {
+        notes.push(format!("{stages} stages"));
+    }
+
+    let exposes: Vec<&str> = s.lines()
+        .filter(|l| l.trim().starts_with("EXPOSE "))
+        .collect();
+    if !exposes.is_empty() {
+        let ports: Vec<&str> = exposes.iter()
+            .flat_map(|l| l.trim().strip_prefix("EXPOSE ").unwrap_or("").split_whitespace())
+            .collect();
+        notes.push(format!("exposes {}", ports.join(", ")));
+    }
+
+    let runs = s.lines().filter(|l| l.trim().starts_with("RUN ")).count();
+    if runs > 0 {
+        notes.push(format!("{runs} RUN commands"));
+    }
+
+    notes
+}
+
+// ── .env annotations ────────────────────────────────────────────────────────
+
+fn annotate_env(s: &str) -> Vec<String> {
+    let mut notes = Vec::new();
+    let total_vars = s.lines().filter(|l| {
+        let t = l.trim();
+        !t.is_empty() && !t.starts_with('#') && t.contains('=')
+    }).count();
+    let masked = s.lines().filter(|l| l.contains("=***")).count();
+
+    notes.push(format!("{total_vars} vars"));
+    if masked > 0 {
+        notes.push(format!("{masked} secrets masked"));
+    }
+
+    notes
+}
+
+// ── Terraform annotations ───────────────────────────────────────────────────
+
+fn annotate_terraform(s: &str) -> Vec<String> {
+    let mut notes = Vec::new();
+
+    let resources = s.lines().filter(|l| l.trim().starts_with("resource \"")).count();
+    let variables = s.lines().filter(|l| l.trim().starts_with("variable \"")).count();
+    let modules = s.lines().filter(|l| l.trim().starts_with("module \"")).count();
+    let outputs = s.lines().filter(|l| l.trim().starts_with("output \"")).count();
+    let data_sources = s.lines().filter(|l| l.trim().starts_with("data \"")).count();
+
+    if resources > 0 {
+        notes.push(format!("{resources} resources"));
+    }
+    if data_sources > 0 {
+        notes.push(format!("{data_sources} data sources"));
+    }
+    if modules > 0 {
+        notes.push(format!("{modules} modules"));
+    }
+    if variables > 0 {
+        notes.push(format!("{variables} variables"));
+    }
+    if outputs > 0 {
+        notes.push(format!("{outputs} outputs"));
+    }
+
+    notes
 }

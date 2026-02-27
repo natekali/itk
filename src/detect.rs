@@ -11,6 +11,12 @@ pub enum ContentType {
     Code(String),
     BuildOutput(BuildTool),
     Markdown,
+    Html,
+    Sql,
+    Csv,
+    Dockerfile,
+    EnvFile,
+    Terraform,
     PlainText,
 }
 
@@ -26,6 +32,12 @@ impl ContentType {
             ContentType::Code(l) => format!("code/{l}"),
             ContentType::BuildOutput(t) => format!("build/{t:?}").to_lowercase(),
             ContentType::Markdown => "markdown".to_string(),
+            ContentType::Html => "html".to_string(),
+            ContentType::Sql => "sql".to_string(),
+            ContentType::Csv => "csv".to_string(),
+            ContentType::Dockerfile => "dockerfile".to_string(),
+            ContentType::EnvFile => "env".to_string(),
+            ContentType::Terraform => "terraform".to_string(),
             ContentType::PlainText => "text".to_string(),
         }
     }
@@ -177,8 +189,17 @@ pub fn detect(text: &str, force_diff: bool, force_type: Option<&str>) -> Content
         return parse_forced_type(t);
     }
 
-    // Scan first 8 KB for performance on large inputs
-    let sample = if text.len() > 8192 { &text[..8192] } else { text };
+    // Scan first ~8 KB for performance on large inputs
+    // Find a valid UTF-8 char boundary near 8192
+    let sample = if text.len() > 8192 {
+        let mut end = 8192;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[..end]
+    } else {
+        text
+    };
 
     // ── 1. Git diff — very distinctive markers ────────────────────────────────
     if re_git_diff().is_match(sample) {
@@ -255,12 +276,42 @@ pub fn detect(text: &str, force_diff: bool, force_type: Option<&str>) -> Content
         return ContentType::Markdown;
     }
 
+    // ── 7.5. HTML/XML ────────────────────────────────────────────────────────
+    if lookslike_html(sample) {
+        return ContentType::Html;
+    }
+
+    // ── 7.6. SQL ─────────────────────────────────────────────────────────────
+    if lookslike_sql(sample) {
+        return ContentType::Sql;
+    }
+
+    // ── 7.7. Dockerfile ──────────────────────────────────────────────────────
+    if lookslike_dockerfile(sample) {
+        return ContentType::Dockerfile;
+    }
+
+    // ── 7.8. Terraform ───────────────────────────────────────────────────────
+    if lookslike_terraform(sample) {
+        return ContentType::Terraform;
+    }
+
+    // ── 7.9. .env file ───────────────────────────────────────────────────────
+    if lookslike_env(sample) {
+        return ContentType::EnvFile;
+    }
+
+    // ── 7.95. CSV ────────────────────────────────────────────────────────────
+    if lookslike_csv(sample) {
+        return ContentType::Csv;
+    }
+
     // ── 8. Code blocks ────────────────────────────────────────────────────────
     if let Some(lang) = detect_code_language(sample) {
         return ContentType::Code(lang);
     }
 
-    // ── 9. ANSI escape codes → treat as log output ───────────────────────────
+    // ── 9. ANSI escape codes -> treat as log output ───────────────────────────
     if re_ansi().is_match(sample) {
         return ContentType::LogFile;
     }
@@ -278,11 +329,19 @@ fn parse_forced_type(t: &str) -> ContentType {
         "python" | "py" => ContentType::Code("python".to_string()),
         "js" | "javascript" => ContentType::Code("javascript".to_string()),
         "ts" | "typescript" => ContentType::Code("typescript".to_string()),
+        "go" => ContentType::Code("go".to_string()),
+        "java" => ContentType::Code("java".to_string()),
         "trace" | "stack" => ContentType::StackTrace(StackTraceLang::Unknown),
         "build" | "cargo" => ContentType::BuildOutput(BuildTool::Cargo),
         "tsc" => ContentType::BuildOutput(BuildTool::TypeScript),
         "eslint" | "lint" => ContentType::BuildOutput(BuildTool::Eslint),
         "md" | "markdown" => ContentType::Markdown,
+        "html" | "xml" => ContentType::Html,
+        "sql" => ContentType::Sql,
+        "csv" => ContentType::Csv,
+        "dockerfile" | "docker" => ContentType::Dockerfile,
+        "env" | "dotenv" => ContentType::EnvFile,
+        "terraform" | "tf" | "hcl" => ContentType::Terraform,
         _ => ContentType::PlainText,
     }
 }
@@ -363,4 +422,110 @@ fn detect_code_language(s: &str) -> Option<String> {
     }
 
     None
+}
+
+// ── HTML/XML detection ──────────────────────────────────────────────────────
+
+fn lookslike_html(s: &str) -> bool {
+    let trimmed = s.trim_start();
+    // Strong signals: doctype, html tag, common structural tags
+    if trimmed.starts_with("<!DOCTYPE") || trimmed.starts_with("<!doctype") {
+        return true;
+    }
+    if trimmed.starts_with("<html") || trimmed.starts_with("<HTML") {
+        return true;
+    }
+    if trimmed.starts_with("<?xml") {
+        return true;
+    }
+    // Weaker signals: need multiple HTML tags
+    let tag_count = s.lines().filter(|l| {
+        let t = l.trim();
+        t.starts_with('<') && (
+            t.starts_with("<div") || t.starts_with("<span") || t.starts_with("<p")
+            || t.starts_with("<h1") || t.starts_with("<h2") || t.starts_with("<h3")
+            || t.starts_with("<head") || t.starts_with("<body") || t.starts_with("<meta")
+            || t.starts_with("<link") || t.starts_with("<script") || t.starts_with("<style")
+            || t.starts_with("<form") || t.starts_with("<input") || t.starts_with("<table")
+            || t.starts_with("<ul") || t.starts_with("<ol") || t.starts_with("<li")
+            || t.starts_with("<a ") || t.starts_with("<img") || t.starts_with("<br")
+            || t.starts_with("<nav") || t.starts_with("<header") || t.starts_with("<footer")
+            || t.starts_with("<section") || t.starts_with("<article") || t.starts_with("<main")
+            || t.starts_with("</")
+        )
+    }).count();
+    tag_count >= 3
+}
+
+// ── SQL detection ───────────────────────────────────────────────────────────
+
+fn lookslike_sql(s: &str) -> bool {
+    let upper = s.to_uppercase();
+    let sql_keywords = ["SELECT ", "INSERT ", "UPDATE ", "DELETE ", "CREATE TABLE",
+                        "ALTER TABLE", "DROP TABLE", "CREATE INDEX", "BEGIN", "COMMIT",
+                        "WITH ", "JOIN ", "WHERE ", "GROUP BY", "ORDER BY", "HAVING"];
+    let matches = sql_keywords.iter().filter(|kw| upper.contains(*kw)).count();
+    // Need at least 2 different SQL keywords
+    matches >= 2
+}
+
+// ── Dockerfile detection ────────────────────────────────────────────────────
+
+fn lookslike_dockerfile(s: &str) -> bool {
+    let keywords = ["FROM ", "RUN ", "COPY ", "ADD ", "CMD ", "ENTRYPOINT ",
+                     "EXPOSE ", "ENV ", "WORKDIR ", "ARG ", "LABEL ", "USER ",
+                     "VOLUME ", "HEALTHCHECK "];
+    let has_from = s.lines().any(|l| l.trim().starts_with("FROM "));
+    let keyword_count = keywords.iter().filter(|kw| {
+        s.lines().any(|l| l.trim().starts_with(*kw))
+    }).count();
+    has_from && keyword_count >= 3
+}
+
+// ── Terraform/HCL detection ────────────────────────────────────────────────
+
+fn lookslike_terraform(s: &str) -> bool {
+    let tf_patterns = [
+        "resource \"", "variable \"", "output \"", "data \"", "module \"",
+        "provider \"", "terraform {", "locals {",
+    ];
+    let matches = tf_patterns.iter().filter(|p| s.contains(*p)).count();
+    matches >= 2
+}
+
+// ── .env file detection ─────────────────────────────────────────────────────
+
+fn re_env_line() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        // KEY=value or export KEY=value (no spaces in key, not a comment)
+        Regex::new(r"^(?:export\s+)?[A-Z][A-Z0-9_]+=").unwrap()
+    })
+}
+
+fn lookslike_env(s: &str) -> bool {
+    let total_lines = s.lines().filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#')).count();
+    if total_lines < 2 {
+        return false;
+    }
+    let env_lines = s.lines().filter(|l| re_env_line().is_match(l.trim())).count();
+    // At least 60% of non-empty, non-comment lines should be KEY=value
+    env_lines >= 2 && (env_lines as f64 / total_lines as f64) >= 0.6
+}
+
+// ── CSV detection ───────────────────────────────────────────────────────────
+
+fn lookslike_csv(s: &str) -> bool {
+    let lines: Vec<&str> = s.lines().take(10).collect();
+    if lines.len() < 2 {
+        return false;
+    }
+    // Check comma-delimited: header and data rows should have consistent field count
+    let first_count = lines[0].split(',').count();
+    if first_count < 3 {
+        return false; // need at least 3 columns
+    }
+    // Check at least 3 rows have the same field count
+    let consistent = lines.iter().filter(|l| l.split(',').count() == first_count).count();
+    consistent >= 3
 }

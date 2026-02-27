@@ -168,3 +168,108 @@ pub fn query_by_type(conn: &Connection) -> Result<Vec<(String, u64, f64)>> {
     })?;
     rows.collect()
 }
+
+// ── Date-range queries ───────────────────────────────────────────────────────
+
+/// Stats for a date range (since N days ago).
+pub fn query_range(conn: &Connection, since_days: u32) -> Result<TotalStats> {
+    let cutoff = Utc::now() - chrono::Duration::days(since_days as i64);
+    let cutoff_str = cutoff.to_rfc3339();
+    conn.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(original_tokens), 0),
+                COALESCE(SUM(cleaned_tokens), 0),
+                COALESCE(AVG(savings_pct), 0.0)
+         FROM runs
+         WHERE ts >= ?1",
+        params![cutoff_str],
+        |row| {
+            Ok(TotalStats {
+                runs: row.get::<_, i64>(0)? as u64,
+                original_tokens: row.get::<_, i64>(1)? as u64,
+                cleaned_tokens: row.get::<_, i64>(2)? as u64,
+                avg_savings_pct: row.get(3)?,
+            })
+        },
+    )
+}
+
+/// Daily breakdown: (date_str, runs, original_tokens, cleaned_tokens, avg_savings_pct).
+pub struct DailyStats {
+    pub date: String,
+    pub runs: u64,
+    pub original_tokens: u64,
+    pub cleaned_tokens: u64,
+    pub avg_savings_pct: f64,
+}
+
+pub fn query_daily(conn: &Connection, since_days: u32) -> Result<Vec<DailyStats>> {
+    let cutoff = Utc::now() - chrono::Duration::days(since_days as i64);
+    let cutoff_str = cutoff.to_rfc3339();
+    let mut stmt = conn.prepare(
+        "SELECT SUBSTR(ts, 1, 10) AS day,
+                COUNT(*),
+                COALESCE(SUM(original_tokens), 0),
+                COALESCE(SUM(cleaned_tokens), 0),
+                COALESCE(AVG(savings_pct), 0.0)
+         FROM runs
+         WHERE ts >= ?1
+         GROUP BY day
+         ORDER BY day DESC",
+    )?;
+    let rows = stmt.query_map(params![cutoff_str], |row| {
+        Ok(DailyStats {
+            date: row.get(0)?,
+            runs: row.get::<_, i64>(1)? as u64,
+            original_tokens: row.get::<_, i64>(2)? as u64,
+            cleaned_tokens: row.get::<_, i64>(3)? as u64,
+            avg_savings_pct: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// History filtered by date range.
+pub fn query_history_since(conn: &Connection, since_days: u32, limit: u32) -> Result<Vec<RunRecord>> {
+    let cutoff = Utc::now() - chrono::Duration::days(since_days as i64);
+    let cutoff_str = cutoff.to_rfc3339();
+    let mut stmt = conn.prepare(
+        "SELECT ts, content_type, original_tokens, cleaned_tokens, savings_pct
+         FROM runs
+         WHERE ts >= ?1
+         ORDER BY id DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![cutoff_str, limit as i64], |row| {
+        Ok(RunRecord {
+            ts: row.get(0)?,
+            content_type: row.get(1)?,
+            original_tokens: row.get(2)?,
+            cleaned_tokens: row.get(3)?,
+            savings_pct: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// All runs in a date range (for export).
+pub fn query_all_since(conn: &Connection, since_days: u32) -> Result<Vec<RunRecord>> {
+    let cutoff = Utc::now() - chrono::Duration::days(since_days as i64);
+    let cutoff_str = cutoff.to_rfc3339();
+    let mut stmt = conn.prepare(
+        "SELECT ts, content_type, original_tokens, cleaned_tokens, savings_pct
+         FROM runs
+         WHERE ts >= ?1
+         ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map(params![cutoff_str], |row| {
+        Ok(RunRecord {
+            ts: row.get(0)?,
+            content_type: row.get(1)?,
+            original_tokens: row.get(2)?,
+            cleaned_tokens: row.get(3)?,
+            savings_pct: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}

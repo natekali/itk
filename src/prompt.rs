@@ -48,6 +48,12 @@ fn role_for(ct: &ContentType) -> &'static str {
         },
         ContentType::BuildOutput(_) => "You are a senior developer diagnosing build failures.",
         ContentType::Markdown => "You are a senior technical writer reviewing documentation.",
+        ContentType::Html => "You are a senior frontend developer.",
+        ContentType::Sql => "You are a senior database engineer.",
+        ContentType::Csv => "You are a senior data analyst.",
+        ContentType::Dockerfile => "You are a senior DevOps engineer reviewing container configuration.",
+        ContentType::EnvFile => "You are a senior DevOps engineer reviewing environment configuration.",
+        ContentType::Terraform => "You are a senior infrastructure engineer reviewing IaC.",
         ContentType::PlainText => "You are a senior software engineer.",
     }
 }
@@ -86,6 +92,26 @@ fn task_for(prompt_type: &str, ct: &ContentType) -> &'static str {
         },
         "optimize" => "Identify performance bottlenecks and suggest optimizations. Focus on measurable improvements, not micro-optimizations.",
         "convert" => "Convert this to the most appropriate equivalent format, preserving all semantics.",
+        "document" => match ct {
+            ContentType::Code(lang) => match lang.as_str() {
+                "rust" => "Generate Rustdoc documentation for all public items in this code.",
+                "python" => "Generate docstrings (Google style) for all functions and classes.",
+                "typescript" | "ts" | "javascript" | "js" => "Generate JSDoc documentation for all exported functions and types.",
+                _ => "Generate documentation for all public functions and types.",
+            },
+            _ => "Generate clear, concise documentation for this content.",
+        },
+        "migrate" => match ct {
+            ContentType::Code(_) => "Migrate this code to the target framework/language. Preserve all behavior and add comments where the migration changes semantics.",
+            ContentType::Yaml => "Migrate this configuration to the target format, preserving all settings.",
+            _ => "Migrate this to the target format, preserving all semantics and behavior.",
+        },
+        "security" => match ct {
+            ContentType::Code(_) => "Audit this code for security vulnerabilities: injection, auth bypass, data exposure, insecure defaults.",
+            ContentType::Yaml => "Audit this configuration for security issues: exposed secrets, permissive RBAC, missing TLS, open ports.",
+            ContentType::GitDiff => "Review this diff for security regressions: new vulnerabilities, weakened auth, exposed secrets.",
+            _ => "Audit this for security vulnerabilities and misconfigurations.",
+        },
         _ => "Review this and provide your analysis.",
     }
 }
@@ -109,6 +135,11 @@ fn output_format_for(prompt_type: &str, ct: &ContentType) -> &'static str {
         "explain" => "",  // Free-form explanation is fine
         "refactor" =>
             "Show the refactored code, then list key changes and why.",
+        "document" => "",  // Let LLM produce idiomatic docs
+        "migrate" =>
+            "Respond with:\n1. **Migrated code**: the full converted version\n2. **Breaking changes**: list any semantic differences\n3. **Manual steps**: anything that can't be auto-migrated",
+        "security" =>
+            "For each vulnerability:\n- **Severity**: Critical / High / Medium / Low\n- **Type**: e.g., SQL Injection, XSS, SSRF\n- **Location**: file and line\n- **Fix**: specific remediation",
         _ => "",
     }
 }
