@@ -33,4 +33,4 @@ src\undo.rs:
 src\update.rs:
 src\watch.rs:
 
-# env-dep:CARGO_PKG_VERSION=0.4.0
+# env-dep:CARGO_PKG_VERSION=0.5.0

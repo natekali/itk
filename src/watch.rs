@@ -207,7 +207,7 @@ fn setup_ctrlc(running: Arc<AtomicBool>) {
     {
         // Unix: simple approach -- spawn a thread that checks for termination
         // We use the process signal handler via std
-        let r = running;
+        let r = running.clone();
         thread::spawn(move || {
             // Use a pipe-based signal handler approach
             // For simplicity, just sleep and check -- the OS will deliver SIGINT
