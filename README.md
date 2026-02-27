@@ -1,14 +1,50 @@
-# itk - Input Token Killer
+# itk — Input Token Killer
 
+[![Version](https://img.shields.io/badge/version-0.5.0-a78bfa.svg)](https://github.com/natekali/itk/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-blue.svg)](https://github.com/natekali/itk/releases)
+[![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 
 **Frame, compress, and prompt-wrap content before pasting into LLMs.**
 
-[GitHub](https://github.com/natekali/itk)
+[GitHub](https://github.com/natekali/itk) · [Website](https://natekali.github.io/itk) · [RTK (output companion)](https://github.com/natekali/rtk)
 
 itk auto-detects what you're pasting — stack traces, JSON, YAML, diffs, logs, code, build output, markdown, HTML, SQL, CSV, Dockerfiles, .env files, Terraform — cleans it, frames it with context annotations, and optionally wraps it in research-backed prompt templates. Your LLM gets better input, you save tokens and money.
 
 **RTK kills noise in output. ITK frames signal in input.**
+
+<details>
+<summary><strong>Table of Contents</strong></summary>
+
+- [Why ITK](#why-itk)
+- [How It Works](#how-it-works)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Watch Mode](#watch-mode)
+- [Undo](#undo)
+- [Claude Code Integration](#zero-friction-claude-code-integration)
+- [File Input Mode](#file-input-mode)
+- [Preview Mode](#preview-mode)
+- [Content Types (15)](#content-types-15-supported)
+- [Context Framing](#context-framing)
+- [What Gets Cleaned](#what-gets-cleaned)
+- [Compression Levels](#compression-levels)
+- [Prompt Templates (11)](#prompt-templates)
+- [Find Missed Savings](#find-missed-savings)
+- [Token Savings Dashboard](#token-savings-dashboard)
+- [Config File](#config-file)
+- [Shell Completions](#shell-completions)
+- [Colored Output](#colored-output)
+- [All Options](#all-options)
+- [ITK + RTK](#itk--rtk----the-complete-pair)
+- [Design Principles](#design-principles)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [License](#license)
+
+</details>
+
+---
 
 ## Why ITK
 
@@ -90,7 +126,7 @@ itk update
 
 ### Verify
 ```bash
-itk --version    # Should show "itk 0.4.0"
+itk --version    # Should show "itk 0.5.0"
 ```
 
 ## Quick Start
@@ -112,7 +148,60 @@ curl -s api.example.com/data | itk --compact
 itk src/main.rs --prompt review
 itk error.log --stats
 itk config.yaml --compact
+
+# Background mode -- auto-optimize your clipboard:
+itk watch
+
+# Made a mistake? Undo the last change:
+itk undo
 ```
+
+---
+
+## Watch Mode
+
+Zero-friction clipboard optimization. Start it and forget it -- ITK automatically cleans developer content as you copy.
+
+```bash
+itk watch
+```
+
+```
+itk: watching clipboard... press Ctrl+C to stop
+
+  itk: [trace/python] 2400 -> 600 tokens (-75%) v
+  itk: [json] 1200 -> 800 tokens (-33%) v
+  itk: [text] skipped (plain text)
+  itk: [log] 8000 -> 1600 tokens (-80%) v
+
+^C
+itk: session summary: 3 runs, ~9200 tokens saved
+```
+
+**How it works:**
+- Polls clipboard every 250ms (negligible CPU)
+- Auto-detects content type -- skips plain text and short content (<200 chars)
+- Runs the full detect -> clean -> frame pipeline
+- Saves undo state before each modification
+- Ctrl+C prints session summary with total runs and tokens saved
+
+Works with any LLM workflow -- ChatGPT, Gemini, local models. Just keep `itk watch` running in a terminal.
+
+---
+
+## Undo
+
+Safety net. Restores your clipboard to the state before ITK last modified it.
+
+```bash
+itk undo
+```
+
+```
+itk: clipboard restored (2,847 chars, 89 lines)
+```
+
+Works with both manual `itk` runs and `itk watch`. Single-level undo (last modification only). If nothing was modified, shows `nothing to undo`.
 
 ---
 
@@ -443,6 +532,31 @@ itk completions powershell > itk.ps1
 
 ---
 
+## Colored Output
+
+ITK uses semantic terminal colors for better readability:
+
+- **Green** -- savings percentages, success messages
+- **Red** -- error messages
+- **Cyan** -- content type labels, info
+- **Yellow** -- warnings, negative savings
+- **Dim** -- borders, paths, secondary info
+- **Bold** -- headers, important values
+
+Color is automatic and respects terminal standards:
+
+```bash
+# Colors enabled by default in interactive terminals (TTY)
+# Automatically disabled when piping (stdout is never colored)
+
+NO_COLOR=1 itk gain     # Force disable colors
+FORCE_COLOR=1 itk gain  # Force enable colors (even in pipes)
+```
+
+> stdout content (clipboard/pipe data) is **never** colored -- only stderr status messages and interactive displays like `itk gain` use color.
+
+---
+
 ## All Options
 
 ```
@@ -461,6 +575,8 @@ COMMANDS:
     --global, -g        Install globally (~/.claude/)
     --show              Show current hook status
     --uninstall         Remove ITK hook and ITK.md
+  watch                 Watch clipboard and auto-optimize developer content
+  undo                  Restore clipboard to before last ITK modification
   completions <SHELL>   Generate shell completions (bash/zsh/fish/powershell)
   update                Update itk to the latest release
 
@@ -489,7 +605,7 @@ OPTIONS:
 |---|---|---|
 | **Direction** | Output (command -> LLM) | Input (you -> LLM) |
 | **How** | Proxy wrapping CLI commands | Clipboard/pipe/file processor |
-| **When** | Automatic via hook | Automatic via `itk init`, or manual |
+| **When** | Automatic via hook | Automatic via `itk init` or `itk watch`, or manual |
 | **Savings** | 60-90% on command output | 10-80% on pasted content |
 | **Unique value** | Filters noise from `git`, `cargo`, `ls` | Frames and prompt-wraps your content |
 
@@ -500,10 +616,12 @@ Use both together for maximum token efficiency:
 rtk git diff          # LLM sees compact diff
 rtk cargo test        # LLM sees failures only
 
-# ITK handles input -- automatic via itk init, or manual
+# ITK handles input -- automatic via itk init or itk watch, or manual
 itk                   # Clean + frame clipboard
+itk watch             # Auto-optimize in background
 itk error.log         # Process a file directly
 itk --prompt fix      # Wrap in fix-request prompt
+itk undo              # Restore if needed
 ```
 
 ---
@@ -566,14 +684,38 @@ itk --dry-run
 
 ---
 
-## License
+## Contributing
 
-MIT -- see [LICENSE](LICENSE)
+Contributions welcome! Here's how to get started:
+
+### Development Setup
+```bash
+git clone https://github.com/natekali/itk.git
+cd itk
+cargo build
+```
+
+### Running
+```bash
+cargo run -- --help           # Run in debug mode
+cargo run -- --dry-run        # Test without clipboard modification
+echo '{"test": true}' | cargo run  # Test with piped input
+```
+
+### Building a Release
+```bash
+cargo build --release
+```
+
+### Pull Requests
+- Open an issue first for larger changes
+- Keep PRs focused on a single feature or fix
+- Ensure `cargo build` passes with zero errors and zero warnings
+
+Issues: [github.com/natekali/itk/issues](https://github.com/natekali/itk/issues)
 
 ---
 
-## Contributing
+## License
 
-Contributions welcome! Open an issue or PR on [GitHub](https://github.com/natekali/itk).
-
-Issues: [github.com/natekali/itk/issues](https://github.com/natekali/itk/issues)
+MIT -- see [LICENSE](LICENSE)
