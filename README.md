@@ -7,7 +7,7 @@
 
 **Frame, compress, and prompt-wrap content before pasting into LLMs.**
 
-[GitHub](https://github.com/natekali/itk) · [Website](https://natekali.github.io/itk) · [RTK (output companion)](https://github.com/natekali/rtk)
+[GitHub](https://github.com/natekali/itk) · [Website](https://natekali.github.io/itk) · [RTK (output companion)](https://www.rtk-ai.app/)
 
 itk auto-detects what you're pasting — stack traces, JSON, YAML, diffs, logs, code, build output, markdown, HTML, SQL, CSV, Dockerfiles, .env files, Terraform — cleans it, frames it with context annotations, and optionally wraps it in research-backed prompt templates. Your LLM gets better input, you save tokens and money.
 
@@ -718,4 +718,4 @@ Issues: [github.com/natekali/itk/issues](https://github.com/natekali/itk/issues)
 
 ## License
 
-MIT -- see [LICENSE](LICENSE)
+MIT -- see [LICENSE](https://raw.githubusercontent.com/natekali/itk/refs/heads/main/LICENSE.txt)
