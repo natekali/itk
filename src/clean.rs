@@ -1,14 +1,11 @@
 use crate::detect::{BuildTool, ContentType, StackTraceLang};
-use crate::prompt;
 use regex::Regex;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-pub struct CleanOptions<'a> {
+pub struct CleanOptions {
     pub aggressive: bool,
     pub _diff_mode: bool,
-    pub add_summary: bool,
-    pub prompt_type: Option<&'a str>,
     pub content_type: ContentType,
 }
 
@@ -27,7 +24,7 @@ pub fn clean(input: &str, opts: &CleanOptions) -> String {
 fn clean_inner(input: &str, opts: &CleanOptions) -> String {
     let stripped = strip_ansi(input);
 
-    let mut cleaned = match &opts.content_type {
+    let cleaned = match &opts.content_type {
         ContentType::StackTrace(lang) => clean_stack_trace(&stripped, lang, opts.aggressive),
         ContentType::GitDiff => clean_git_diff(&stripped, opts.aggressive),
         ContentType::LogFile => clean_log(&stripped, opts.aggressive),
@@ -39,15 +36,7 @@ fn clean_inner(input: &str, opts: &CleanOptions) -> String {
         ContentType::PlainText => clean_plain(&stripped),
     };
 
-    if opts.add_summary {
-        let summary = summarize(&cleaned, &opts.content_type);
-        cleaned = format!("{summary}\n\n{cleaned}");
-    }
-
-    if let Some(pt) = opts.prompt_type {
-        cleaned = prompt::wrap(&cleaned, pt, &opts.content_type);
-    }
-
+    // Note: summary/framing and prompt wrapping are now handled in main.rs
     cleaned
 }
 
@@ -805,9 +794,19 @@ fn clean_json(s: &str, aggressive: bool) -> String {
         Ok(val) => {
             let val = json_extract_error_context(val);
             let val = json_prune_empty(val);
-            let val = json_dedup_array_objects(val, if aggressive { 1 } else { 2 });
-            let val = json_collapse_single_child_paths(val);
-            serde_json::to_string_pretty(&val).unwrap_or_else(|_| s.to_string())
+            if aggressive {
+                let val = json_strip_metadata_keys(val);
+                let val = json_truncate_long_strings(val);
+                let val = json_round_floats(val);
+                let val = json_dedup_array_objects(val, 1);
+                let val = json_collapse_single_child_paths(val);
+                serde_json::to_string_pretty(&val).unwrap_or_else(|_| s.to_string())
+            } else {
+                let val = json_truncate_long_strings(val);
+                let val = json_dedup_array_objects(val, 2);
+                let val = json_collapse_single_child_paths(val);
+                serde_json::to_string_pretty(&val).unwrap_or_else(|_| s.to_string())
+            }
         }
         Err(_) => clean_plain(s),
     }
@@ -981,6 +980,76 @@ fn json_collapse_single_child_paths(val: serde_json::Value) -> serde_json::Value
     }
 }
 
+/// Truncate string values > 200 chars (removes base64 blobs, long descriptions).
+fn json_truncate_long_strings(val: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match val {
+        Value::String(s) if s.len() > 200 => {
+            Value::String(format!("{}...[{} chars]", &s[..100], s.len()))
+        }
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(k, v)| (k, json_truncate_long_strings(v)))
+                .collect(),
+        ),
+        Value::Array(arr) => Value::Array(
+            arr.into_iter().map(json_truncate_long_strings).collect(),
+        ),
+        other => other,
+    }
+}
+
+/// Remove common metadata/noise keys (HAL, OData, GraphQL __typename, timestamps).
+fn json_strip_metadata_keys(val: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    const NOISE_KEYS: &[&str] = &[
+        "_links", "_embedded", "@odata.context", "@odata.type",
+        "$schema", "__typename", "createdAt", "updatedAt",
+        "created_at", "updated_at", "modified_at", "modifiedAt",
+    ];
+    match val {
+        Value::Object(map) => {
+            let filtered: serde_json::Map<String, Value> = map
+                .into_iter()
+                .filter(|(k, _)| !NOISE_KEYS.contains(&k.as_str()))
+                .map(|(k, v)| (k, json_strip_metadata_keys(v)))
+                .collect();
+            Value::Object(filtered)
+        }
+        Value::Array(arr) => Value::Array(
+            arr.into_iter().map(json_strip_metadata_keys).collect(),
+        ),
+        other => other,
+    }
+}
+
+/// Round float values to 2 decimal places.
+fn json_round_floats(val: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match val {
+        Value::Number(n) => {
+            if let Some(f) = n.as_f64() {
+                if f.fract() != 0.0 {
+                    let rounded = (f * 100.0).round() / 100.0;
+                    return Value::Number(
+                        serde_json::Number::from_f64(rounded).unwrap_or(n)
+                    );
+                }
+            }
+            Value::Number(n)
+        }
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(k, v)| (k, json_round_floats(v)))
+                .collect(),
+        ),
+        Value::Array(arr) => Value::Array(
+            arr.into_iter().map(json_round_floats).collect(),
+        ),
+        other => other,
+    }
+}
+
 // ── YAML ──────────────────────────────────────────────────────────────────────
 
 /// Default key=value pairs commonly found in Kubernetes/Docker/CI YAML.
@@ -1014,6 +1083,15 @@ fn clean_yaml(s: &str, aggressive: bool) -> String {
     // State for skipping multi-line block scalar values under doc keys
     let mut skip_block = false;
     let mut block_indent = 0usize;
+    // State for truncating long block scalars (|, >)
+    let mut in_block_scalar = false;
+    let mut block_scalar_indent = 0usize;
+    let mut block_scalar_lines = 0usize;
+    let mut block_scalar_truncated = false;
+    let mut block_scalar_total = 0usize;
+    // State for skipping status sections (aggressive)
+    let mut skip_status = false;
+    let mut status_indent = 0usize;
 
     for line in s.lines() {
         let trimmed = line.trim();
@@ -1023,9 +1101,41 @@ fn clean_yaml(s: &str, aggressive: bool) -> String {
         if skip_block {
             if !trimmed.is_empty() && indent <= block_indent {
                 skip_block = false;
-                // Fall through to normal processing of this line
             } else {
                 continue;
+            }
+        }
+
+        // Exit status section skip when we outdent
+        if skip_status {
+            if !trimmed.is_empty() && indent <= status_indent {
+                skip_status = false;
+            } else {
+                continue;
+            }
+        }
+
+        // Handle long block scalar truncation
+        if in_block_scalar {
+            if trimmed.is_empty() || indent > block_scalar_indent {
+                block_scalar_lines += 1;
+                block_scalar_total += 1;
+                if block_scalar_lines <= 3 {
+                    let normalized_indent = ((indent + 1) / 2) * 2;
+                    out.push(format!("{:indent$}{trimmed}", "", indent = normalized_indent));
+                } else if !block_scalar_truncated {
+                    block_scalar_truncated = true;
+                    // We'll insert the count after the block ends
+                }
+                continue;
+            } else {
+                // Block scalar ended — insert truncation note if needed
+                if block_scalar_truncated {
+                    let hidden = block_scalar_total - 3;
+                    let note_indent = ((block_scalar_indent + 2 + 1) / 2) * 2;
+                    out.push(format!("{:indent$}# ... [{hidden} more lines]", "", indent = note_indent));
+                }
+                in_block_scalar = false;
             }
         }
 
@@ -1046,6 +1156,14 @@ fn clean_yaml(s: &str, aggressive: bool) -> String {
 
         // Aggressive-mode filters
         if aggressive {
+            // Skip status sections in Kubernetes resource dumps
+            if indent == 0 && trimmed == "status:" {
+                skip_status = true;
+                status_indent = indent;
+                out.push(format!("status: # [omitted by itk]"));
+                continue;
+            }
+
             // Skip documentation keys (description, title, example, etc.)
             let is_doc_key = YAML_DOC_KEYS.iter().any(|dk| {
                 trimmed == *dk
@@ -1053,7 +1171,6 @@ fn clean_yaml(s: &str, aggressive: bool) -> String {
                     || trimmed.starts_with(&format!("{dk} :"))
             });
             if is_doc_key {
-                // Check if value is a block scalar (|, >) — skip continuation lines too
                 let after_colon = trimmed
                     .splitn(2, ':')
                     .nth(1)
@@ -1079,10 +1196,28 @@ fn clean_yaml(s: &str, aggressive: bool) -> String {
             }
         }
 
+        // Detect block scalar start and set up truncation
+        let after_colon = trimmed.splitn(2, ':').nth(1).map(|s| s.trim()).unwrap_or("");
+        if after_colon == "|" || after_colon == ">" || after_colon == "|+" || after_colon == ">-" {
+            in_block_scalar = true;
+            block_scalar_indent = indent;
+            block_scalar_lines = 0;
+            block_scalar_truncated = false;
+            block_scalar_total = 0;
+        }
+
         // Normalize indentation to even multiples of 2
         let normalized_indent = ((indent + 1) / 2) * 2;
         out.push(format!("{:indent$}{trimmed}", "", indent = normalized_indent));
     }
+
+    // Flush final block scalar truncation
+    if in_block_scalar && block_scalar_truncated {
+        let hidden = block_scalar_total - 3;
+        let note_indent = ((block_scalar_indent + 2 + 1) / 2) * 2;
+        out.push(format!("{:indent$}# ... [{hidden} more lines]", "", indent = note_indent));
+    }
+
     out.join("\n")
 }
 
@@ -1110,12 +1245,16 @@ fn clean_code(s: &str, lang: &str, aggressive: bool) -> String {
     let content = code_strip_doc_block_comments(&content, &lang_tag);
     let content = code_strip_trailing_comments(&content, &lang_tag);
     let content = code_collapse_imports(&content, &lang_tag);
-    // In aggressive mode, also strip single-line doc comments (///, //!)
+    // In aggressive mode: strip doc comments, test modules, decorators
     let content = if aggressive {
-        code_strip_line_doc_comments(&content, &lang_tag)
+        let content = code_strip_line_doc_comments(&content, &lang_tag);
+        let content = code_strip_test_modules(&content, &lang_tag);
+        let content = code_strip_decorators(&content, &lang_tag);
+        content
     } else {
         content
     };
+    let content = code_collapse_getters_setters(&content, &lang_tag);
     let content = collapse_blank_lines(&content, if aggressive { 1 } else { 2 });
 
     format!("```{lang_tag}\n{content}\n```")
@@ -1283,6 +1422,153 @@ fn code_collapse_imports(s: &str, lang: &str) -> String {
     out.join("\n")
 }
 
+/// Remove #[cfg(test)] modules in Rust (aggressive only).
+fn code_strip_test_modules(s: &str, lang: &str) -> String {
+    if lang != "rust" {
+        return s.to_string();
+    }
+    let lines: Vec<&str> = s.lines().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        // Detect #[cfg(test)] followed by mod tests { ... }
+        if trimmed == "#[cfg(test)]" {
+            // Skip everything until the matching closing brace at the same indent level
+            let base_indent = lines[i].len() - trimmed.len();
+            let mut depth = 0i32;
+            let mut found_mod = false;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let lt = lines[j].trim();
+                if !found_mod && lt.starts_with("mod ") {
+                    found_mod = true;
+                }
+                depth += lt.chars().filter(|c| *c == '{').count() as i32;
+                depth -= lt.chars().filter(|c| *c == '}').count() as i32;
+                j += 1;
+                if found_mod && depth <= 0 {
+                    break;
+                }
+            }
+            if found_mod {
+                out.push(format!("{}// [test module omitted by itk]", " ".repeat(base_indent)));
+                i = j;
+                continue;
+            }
+        }
+        out.push(lines[i].to_string());
+        i += 1;
+    }
+    out.join("\n")
+}
+
+/// Strip #[derive(...)], @decorators, and similar attribute lines (aggressive only).
+fn code_strip_decorators(s: &str, lang: &str) -> String {
+    let prefix: &[&str] = match lang {
+        "rust" => &["#[derive(", "#[allow(", "#[warn(", "#[serde("],
+        "python" => &["@"],
+        "typescript" | "javascript" | "ts" | "js" => &["@"],
+        "java" | "kotlin" => &["@"],
+        _ => return s.to_string(),
+    };
+    s.lines()
+        .filter(|l| {
+            let t = l.trim();
+            !prefix.iter().any(|p| t.starts_with(p))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Collapse getter/setter boilerplate in Java/TypeScript.
+fn code_collapse_getters_setters(s: &str, lang: &str) -> String {
+    match lang {
+        "java" | "typescript" | "ts" | "javascript" | "js" => {}
+        _ => return s.to_string(),
+    }
+    let re_getter = re_getter_setter();
+    let lines: Vec<&str> = s.lines().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    let mut getter_names: Vec<String> = Vec::new();
+    let mut getter_start: Option<usize> = None;
+
+    while i < lines.len() {
+        if re_getter.is_match(lines[i]) {
+            if getter_start.is_none() {
+                getter_start = Some(out.len());
+            }
+            // Extract property name from get/set method
+            if let Some(name) = extract_accessor_name(lines[i]) {
+                if !getter_names.contains(&name) {
+                    getter_names.push(name);
+                }
+            }
+            // Skip the method body (until closing brace at same indent)
+            let _base_indent = lines[i].len() - lines[i].trim_start().len();
+            let mut depth = 0i32;
+            loop {
+                if i >= lines.len() { break; }
+                depth += lines[i].chars().filter(|c| *c == '{').count() as i32;
+                depth -= lines[i].chars().filter(|c| *c == '}').count() as i32;
+                i += 1;
+                if depth <= 0 { break; }
+            }
+        } else {
+            // Flush accumulated getters/setters
+            if getter_names.len() >= 4 {
+                if let Some(start) = getter_start {
+                    // Remove any already-added getter lines
+                    out.truncate(start);
+                }
+                let names = if getter_names.len() > 4 {
+                    format!("{}, ...", getter_names[..4].join(", "))
+                } else {
+                    getter_names.join(", ")
+                };
+                out.push(format!("  // [{} getters/setters: {}]", getter_names.len(), names));
+            }
+            getter_names.clear();
+            getter_start = None;
+            out.push(lines[i].to_string());
+            i += 1;
+        }
+    }
+    // Flush final batch
+    if getter_names.len() >= 4 {
+        if let Some(start) = getter_start {
+            out.truncate(start);
+        }
+        let names = if getter_names.len() > 4 {
+            format!("{}, ...", getter_names[..4].join(", "))
+        } else {
+            getter_names.join(", ")
+        };
+        out.push(format!("  // [{} getters/setters: {}]", getter_names.len(), names));
+    }
+    out.join("\n")
+}
+
+fn re_getter_setter() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"(?i)^\s+(?:public\s+|private\s+|protected\s+)?(?:get|set)\s+\w+\s*\(").unwrap()
+    })
+}
+
+fn extract_accessor_name(line: &str) -> Option<String> {
+    let re = re_accessor_name();
+    re.captures(line).map(|c| c.get(1).unwrap().as_str().to_lowercase())
+}
+
+fn re_accessor_name() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"(?i)(?:get|set)\s+(\w+)\s*\(").unwrap()
+    })
+}
+
 fn normalize_fenced_code(s: &str) -> String {
     collapse_blank_lines(s, 2)
 }
@@ -1396,12 +1682,15 @@ fn is_badge_line(line: &str) -> bool {
     //   ![alt](url)
     //   [![alt](img_url)](link_url)
     //   Multiple badges on one line
-    if !line.contains("![") {
+    // Note: strip_ansi_escapes may convert [![ to \![, so check both forms.
+    if !line.contains("![") && !line.contains("\\![") {
         return false;
     }
+    // Normalise escaped bangs from ANSI stripping before matching
+    let normalised = line.replace("\\!", "!");
     // Remove all markdown image-link patterns and check nothing substantive remains
     let cleaned = re_badge_pattern()
-        .replace_all(line, "")
+        .replace_all(&normalised, "")
         .trim()
         .to_string();
     cleaned.is_empty()
@@ -1423,20 +1712,61 @@ fn re_html_comment() -> &'static Regex {
 // ── PLAIN TEXT ────────────────────────────────────────────────────────────────
 
 pub fn clean_plain(s: &str) -> String {
-    let mut out = Vec::new();
+    let mut out: Vec<String> = Vec::new();
     let mut blank_run = 0usize;
+    // Track repeated lines for deduplication
+    let mut last_line = String::new();
+    let mut repeat_count = 0usize;
+    let mut suppressed = 0usize;
 
     for line in s.lines() {
         let trimmed_end = line.trim_end();
+
+        // Skip ASCII art borders: lines that are only -=+|_ characters
+        if !trimmed_end.is_empty() && is_ascii_border(trimmed_end) {
+            continue;
+        }
+
+        // Skip quoted reply chains (email/chat style)
+        if trimmed_end.starts_with("> >") || trimmed_end.starts_with(">>>") {
+            continue;
+        }
+
         if trimmed_end.is_empty() {
+            // Flush repeats before blank
+            if suppressed > 0 {
+                out.push(format!("  [... {suppressed} identical lines]"));
+                suppressed = 0;
+            }
             blank_run += 1;
             if blank_run <= 2 {
                 out.push(String::new());
             }
+            last_line.clear();
+            repeat_count = 0;
         } else {
             blank_run = 0;
-            out.push(trimmed_end.to_string());
+            // Deduplicate repeated lines
+            if trimmed_end == last_line {
+                repeat_count += 1;
+                if repeat_count <= 2 {
+                    out.push(trimmed_end.to_string());
+                } else {
+                    suppressed += 1;
+                }
+            } else {
+                if suppressed > 0 {
+                    out.push(format!("  [... {suppressed} identical lines]"));
+                    suppressed = 0;
+                }
+                out.push(trimmed_end.to_string());
+                last_line = trimmed_end.to_string();
+                repeat_count = 1;
+            }
         }
+    }
+    if suppressed > 0 {
+        out.push(format!("  [... {suppressed} identical lines]"));
     }
 
     while out.first().map(|l: &String| l.is_empty()).unwrap_or(false) {
@@ -1448,53 +1778,13 @@ pub fn clean_plain(s: &str) -> String {
     out.join("\n")
 }
 
-// ── SUMMARY ──────────────────────────────────────────────────────────────────
-
-fn summarize(content: &str, ct: &ContentType) -> String {
-    match ct {
-        ContentType::StackTrace(lang) => {
-            let error_line = content
-                .lines()
-                .rev()
-                .find(|l| {
-                    let t = l.trim();
-                    !t.is_empty()
-                        && !t.starts_with("at ")
-                        && !t.starts_with("File ")
-                        && !t.contains("truncated")
-                })
-                .unwrap_or("unknown error");
-            format!("// Stack trace ({lang:?}) — root cause: {}", error_line.trim())
-        }
-        ContentType::GitDiff => {
-            let files = content.lines().filter(|l| l.starts_with("diff --git")).count();
-            let added: usize = content.lines().filter(|l| l.starts_with('+')).count();
-            let removed: usize = content.lines().filter(|l| l.starts_with('-')).count();
-            format!("// Git diff — {files} file(s), +{added}/-{removed} lines")
-        }
-        ContentType::LogFile => {
-            let lines = content.lines().count();
-            format!("// Log output — {lines} lines (cleaned by itk)")
-        }
-        ContentType::Json => "// JSON (compacted by itk)".to_string(),
-        ContentType::Yaml => "// YAML config (compacted by itk)".to_string(),
-        ContentType::Code(lang) => {
-            let lines = content.lines().count();
-            format!("// {lang} — {lines} lines")
-        }
-        ContentType::BuildOutput(tool) => {
-            let errors = content.lines().filter(|l| l.contains("error")).count();
-            format!("// Build output ({tool:?}) — cleaned by itk, {errors} error line(s)")
-        }
-        ContentType::Markdown => {
-            let words = content.split_whitespace().count();
-            format!("// Markdown — ~{words} words (cleaned by itk)")
-        }
-        ContentType::PlainText => {
-            let words = content.split_whitespace().count();
-            format!("// Plain text — ~{words} words")
-        }
+/// Detect lines that are purely ASCII borders/separators.
+fn is_ascii_border(s: &str) -> bool {
+    let trimmed = s.trim();
+    if trimmed.len() < 3 {
+        return false;
     }
+    trimmed.chars().all(|c| matches!(c, '-' | '=' | '+' | '|' | '_' | '*' | ' '))
 }
 
 // Keep this to avoid breaking normalize_fenced_code call if needed elsewhere

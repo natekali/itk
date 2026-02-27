@@ -2,6 +2,7 @@ mod clean;
 mod clipboard;
 mod db;
 mod detect;
+mod frame;
 mod gain;
 mod prompt;
 mod update;
@@ -12,21 +13,26 @@ use std::io::{self, IsTerminal, Read, Write};
 #[derive(Parser)]
 #[command(
     name = "itk",
-    about = "Input Token Killer — compress content before pasting into LLMs",
-    long_about = "ITK reads from clipboard (or stdin), cleans and compresses the content,\n\
+    about = "Input Token Killer — compress and frame content before pasting into LLMs",
+    long_about = "ITK reads from clipboard (or stdin), cleans, compresses, and frames the content,\n\
                   then writes it back to clipboard (or stdout).\n\n\
                   Auto-detects: stack traces (JS/TS/Python/Rust/Go/Java), git diffs,\n\
-                  logs, JSON, YAML, and code blocks.",
+                  logs, JSON, YAML, code blocks, build output, and markdown.\n\n\
+                  Context framing gives LLMs instant orientation about your content.",
     version
 )]
 struct Cli {
-    /// Add a 1-2 line summary header describing the content
-    #[arg(short = 's', long = "summary")]
-    summary: bool,
+    /// Add context frame headers (default: on). Use --no-frame to disable.
+    #[arg(long = "no-frame")]
+    no_frame: bool,
 
-    /// Aggressively truncate repeated frames and deep traces
+    /// Aggressively truncate repeated frames, strip metadata, remove defaults
     #[arg(long = "aggressive")]
     aggressive: bool,
+
+    /// Compact mode: safe compression (string truncation, number rounding)
+    #[arg(short = 'c', long = "compact")]
+    compact: bool,
 
     /// Specialised mode for git diff / patch format
     #[arg(long = "diff")]
@@ -37,9 +43,13 @@ struct Cli {
     #[arg(long = "type", value_name = "TYPE")]
     force_type: Option<String>,
 
-    /// Wrap output in a prompt template: fix | explain | refactor | review | debug
+    /// Wrap output in a prompt template: fix | explain | refactor | review | debug | test | optimize | convert
     #[arg(long = "prompt", value_name = "TEMPLATE")]
     prompt_type: Option<String>,
+
+    /// Direct LLM attention to a specific part of the content
+    #[arg(long = "focus", value_name = "TEXT")]
+    focus: Option<String>,
 
     /// Print token savings and detected type as a header comment
     #[arg(long = "stats")]
@@ -108,20 +118,36 @@ fn main() {
         return;
     }
 
-    // ── Detect → Clean ────────────────────────────────────────────────────────
+    // ── Detect → Clean → Frame ──────────────────────────────────────────────
     let content_type = detect::detect(&input, cli.diff, cli.force_type.as_deref());
 
+    // --compact implies aggressive for safe compression operations
+    let effective_aggressive = cli.aggressive || cli.compact;
+
     let opts = clean::CleanOptions {
-        aggressive: cli.aggressive,
+        aggressive: effective_aggressive,
         _diff_mode: cli.diff,
-        add_summary: cli.summary,
-        prompt_type: cli.prompt_type.as_deref(),
         content_type: content_type.clone(),
     };
 
     let cleaned = clean::clean(&input, &opts);
 
-    // ── Token accounting ──────────────────────────────────────────────────────
+    // ── Context framing ─────────────────────────────────────────────────────
+    let framed = if cli.no_frame {
+        cleaned.clone()
+    } else {
+        let fc = frame::build_frame(&cleaned, &content_type);
+        frame::render_framed(&cleaned, &fc, cli.focus.as_deref())
+    };
+
+    // ── Prompt wrapping ─────────────────────────────────────────────────────
+    let output_content = if let Some(ref pt) = cli.prompt_type {
+        prompt::wrap(&framed, pt, &content_type)
+    } else {
+        framed
+    };
+
+    // ── Token accounting (measure cleaned vs original, not framed output) ────
     let original_tokens = estimate_tokens(&input, &content_type);
     let cleaned_tokens = estimate_tokens(&cleaned, &content_type);
     let savings_pct: i64 = if original_tokens > 0 {
@@ -143,10 +169,10 @@ fn main() {
     // ── Build final output ────────────────────────────────────────────────────
     let output = if cli.stats {
         format!(
-            "# ITK [{type_label}]: {original_tokens} -> {cleaned_tokens} tokens ({savings_str})\n{cleaned}"
+            "# ITK [{type_label}]: {original_tokens} -> {cleaned_tokens} tokens ({savings_str})\n{output_content}"
         )
     } else {
-        cleaned
+        output_content
     };
 
     // ── Write output ──────────────────────────────────────────────────────────
@@ -171,7 +197,7 @@ fn main() {
 
 /// Format savings percentage cleanly.
 ///   saved > 0  =>  "-42%"
-///   saved < 0  =>  "+7%"   (content grew, e.g. code wrapped in fences)
+///   saved < 0  =>  "+7%"   (content grew, e.g. frame added)
 ///   no change  =>  "no change"
 ///   tiny diff  =>  "-<1%" / "+<1%"
 fn format_savings(original: u64, cleaned: u64, pct: i64) -> String {
